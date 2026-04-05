@@ -1,0 +1,10 @@
+# Generated dashboards (only keep the script)
+dashboard.html
+dashboard_*.html
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
