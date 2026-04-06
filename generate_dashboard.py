@@ -289,7 +289,7 @@ def parse_projects(days: int):
     return sessions, hourly
 
 
-def aggregate(sessions: dict, hourly: dict):
+def aggregate(sessions: dict, hourly: dict, days: int = 7):
     """Compute final aggregates for the dashboard."""
     session_titles = load_session_titles()   # cliSessionId → human title
 
@@ -420,6 +420,8 @@ def aggregate(sessions: dict, hourly: dict):
             "unique_sessions": unique_sessions,
             "total_requests": total_requests,
             "avg_cost_per_session": round(grand_total_cost / max(unique_sessions, 1), 4),
+            "avg_tokens_per_session": round(grand_total_tokens / max(unique_sessions, 1)),
+            "days_in_window": days,
         },
         "hourly_series": hourly_series,
         "model_totals": {k: {"tokens": v["tokens"], "cost": round(v["cost"], 4), "requests": v["requests"]}
@@ -755,11 +757,11 @@ function fmt_time(iso) {
 document.getElementById('gen-time').textContent = 'Generated: ' + DATA.generated_at;
 const k = DATA.kpis;
 const kpi_defs = [
-  { label: 'Total Cost', value: fmt_kpi_cost(k.total_cost), sub: 'Past window', cls: 'cost' },
-  { label: 'Cache Savings', value: fmt_kpi_cost(k.total_savings), sub: 'vs no-cache', cls: 'savings' },
-  { label: 'Total Tokens', value: fmt_tokens(k.total_tokens), sub: k.total_requests + ' API requests', cls: 'tokens' },
+  { label: 'Total Tokens', value: fmt_tokens(k.total_tokens), sub: k.total_requests + ' API requests', sub2: '≈ ' + fmt_kpi_cost(k.total_cost) + ' API equiv', cls: 'tokens' },
+  { label: 'Tokens / Day', value: fmt_tokens(Math.round(k.total_tokens / k.days_in_window)), sub: k.days_in_window + '-day avg', cls: 'tokens' },
   { label: 'Sessions', value: k.unique_sessions, sub: 'Main (excl. subagents)', cls: '' },
-  { label: 'Avg Cost / Session', value: fmt_kpi_cost(k.avg_cost_per_session), sub: 'main sessions', cls: '' },
+  { label: 'Tokens / Session', value: fmt_tokens(k.avg_tokens_per_session), sub: 'avg per main session', cls: '' },
+  { label: 'Cache Savings', value: fmt_kpi_cost(k.total_savings), sub: 'vs no-cache baseline', cls: 'savings' },
 ];
 const kpiGrid = document.getElementById('kpi-cards');
 kpi_defs.forEach(d => {
@@ -767,6 +769,7 @@ kpi_defs.forEach(d => {
     <div class="label">${d.label}</div>
     <div class="value">${d.value}</div>
     <div class="sub">${d.sub}</div>
+    ${d.sub2 ? `<div class="sub" style="margin-top:2px;opacity:0.6;font-size:10px">${d.sub2}</div>` : ''}
   </div>`;
 });
 
@@ -1327,7 +1330,7 @@ def main():
     print(f"      Found {len(sessions)} sessions, {len(hourly)} hourly buckets")
 
     print("[2/3] Aggregating data...")
-    data = aggregate(sessions, hourly)
+    data = aggregate(sessions, hourly, args.days)
     k = data["kpis"]
     print(f"      Total cost: ${k['total_cost']:.4f}  |  Tokens: {k['total_tokens']:,}  |  Sessions: {k['unique_sessions']}")
     print(f"      Cache savings: ${k['total_savings']:.4f}  |  Spikes: {sum(1 for h in data['hourly_series'] if h.get('is_spike'))}")
