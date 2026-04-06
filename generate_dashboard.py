@@ -702,11 +702,12 @@ const DATA = __DATA__;
 
 // ── Utils ──────────────────────────────────────────────────────────
 function fmt_tokens(n) {
-  if (n >= 1e6) return (n/1e6).toFixed(2) + 'M';
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
   if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
   return n;
 }
 function fmt_cost(c) { return '$' + c.toFixed(2); }
+function fmt_kpi_cost(c) { return '$' + c.toLocaleString('en-US', {minimumFractionDigits:1, maximumFractionDigits:1}); }
 function fmt_dur(min) {
   const m = Math.round(min);
   if (m < 60) return m + 'm';
@@ -754,11 +755,11 @@ function fmt_time(iso) {
 document.getElementById('gen-time').textContent = 'Generated: ' + DATA.generated_at;
 const k = DATA.kpis;
 const kpi_defs = [
-  { label: 'Total Cost', value: '$' + k.total_cost.toFixed(2), sub: 'Past window', cls: 'cost' },
-  { label: 'Cache Savings', value: '$' + k.total_savings.toFixed(2), sub: 'vs no-cache', cls: 'savings' },
+  { label: 'Total Cost', value: fmt_kpi_cost(k.total_cost), sub: 'Past window', cls: 'cost' },
+  { label: 'Cache Savings', value: fmt_kpi_cost(k.total_savings), sub: 'vs no-cache', cls: 'savings' },
   { label: 'Total Tokens', value: fmt_tokens(k.total_tokens), sub: k.total_requests + ' API requests', cls: 'tokens' },
   { label: 'Sessions', value: k.unique_sessions, sub: 'Main (excl. subagents)', cls: '' },
-  { label: 'Avg Cost / Session', value: '$' + k.avg_cost_per_session.toFixed(2), sub: 'main sessions', cls: '' },
+  { label: 'Avg Cost / Session', value: fmt_kpi_cost(k.avg_cost_per_session), sub: 'main sessions', cls: '' },
 ];
 const kpiGrid = document.getElementById('kpi-cards');
 kpi_defs.forEach(d => {
