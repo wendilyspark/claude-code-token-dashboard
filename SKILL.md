@@ -24,7 +24,7 @@ python3 ~/.claude/skills/token-dashboard/generate_dashboard.py --days 7
 - `--days N` — Load N days of data (default: 7). The UI can filter further.
 - `--no-open` — Generate without auto-opening in browser.
 
-The script auto-opens the dashboard in the default browser after generation.
+The script always overwrites the same `dashboard.html` file — never creates new or dated copies.
 
 ## What It Shows
 
