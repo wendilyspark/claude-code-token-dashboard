@@ -1339,15 +1339,10 @@ def main():
     script_dir = Path(__file__).parent
     output_path = Path(args.output) if args.output else script_dir / "dashboard.html"
 
-    # Also save a dated archive copy
-    dated_path = script_dir / f"dashboard_{datetime.now().strftime('%Y%m%d_%H%M')}.html"
-
     html = HTML_TEMPLATE.replace("__DATA__", json.dumps(data, ensure_ascii=False, separators=(',', ':')))
     output_path.write_text(html, encoding="utf-8")
-    dated_path.write_text(html, encoding="utf-8")
 
     print(f"\n✅ Dashboard written to: {output_path}")
-    print(f"   Archive copy: {dated_path}")
 
     if args.open:
         print("   Opening in browser...")
