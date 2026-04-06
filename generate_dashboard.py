@@ -1302,6 +1302,7 @@ obsInline.observe(document.getElementById('pagination-inline'));
     <dl class="glossary-card"><dt>Spike</dt><dd>An hour where token usage was &gt;2 standard deviations above the session average. Usually large file reads or many rapid requests.</dd></dl>
     <dl class="glossary-card"><dt>Compact</dt><dd>Context compaction: Claude auto-summarised history when nearing the context limit. Token count shown is the size just before compaction.</dd></dl>
     <dl class="glossary-card"><dt>Session task</dt><dd>The first user message of a session — used as a short label to identify what you were working on.</dd></dl>
+    <dl class="glossary-card"><dt>Cost</dt><dd>Theoretical cost calculated from token counts × standard API rates (e.g. $15/M for Opus input). If you use a Claude subscription plan, this is <em>not</em> your actual charge — it shows what the same usage would cost on pay-per-token API billing.</dd></dl>
   </div>
 </div>
 </div>
