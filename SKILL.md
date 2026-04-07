@@ -5,36 +5,47 @@ description: Generate and view a Claude Code token usage dashboard. Use when the
 
 # Token Dashboard Skill
 
-Generate a standalone HTML dashboard showing Claude Code token usage, costs, cache savings, session breakdowns, and time-series charts.
+When this skill is triggered, immediately run the dashboard server and open it in the browser. Do not ask the user anything first.
 
-## When to Use
+## Steps to Execute
 
-Trigger on any of these:
-- "token usage", "token dashboard", "usage dashboard"
-- "how much have I spent", "API costs", "spending"
-- "show my usage", "token stats", "usage report"
-
-## How to Run
-
+1. Check if the server is already running:
 ```bash
-python3 ~/.claude/skills/token-dashboard/generate_dashboard.py --days 7
+lsof -i :8765 | grep LISTEN
 ```
 
-### Options
-- `--days N` — Load N days of data (default: 7). The UI can filter further.
-- `--no-open` — Generate without auto-opening in browser.
+2. If NOT running, start it in the background:
+```bash
+nohup python3 ~/.claude/skills/token-dashboard/generate_dashboard.py --no-open > /tmp/token-dashboard.log 2>&1 &
+sleep 2
+```
 
-The script always overwrites the same `dashboard.html` file — never creates new or dated copies.
+3. Open the dashboard in the browser:
+```bash
+open http://localhost:8765
+```
+
+4. Tell the user:
+> Dashboard is live at http://localhost:8765 — Cmd+R refreshes data in real time. The server runs in the background until you restart your machine or kill it manually.
+
+## Options
+
+- `--days N` — Load N days of data (default: 7)
+- `--port N` — Use a different port (default: 8765)
 
 ## What It Shows
 
-- **Overview KPIs**: Total cost, cache savings, total tokens, session count, avg cost/session
+- **Overview KPIs**: Total tokens, tokens/day, sessions, tokens/session, cache savings
 - **Token Usage Over Time**: Interactive bar chart with 1D/3D/7D/30D/1Y views + custom date range
 - **Breakdown**: Cost by model, task type distribution
 - **Events**: Spike hours, context compaction events (with modal details)
 - **Sessions Table**: Sortable by cost, expandable detail rows with top 5 most expensive requests per session
-- **Terminology Glossary**: Definitions of key terms (session, request, tokens, savings, spike, compact, session task)
+- **Terminology Glossary**: Definitions of key terms
 
 ## Data Source
 
-Reads JSONL files from `~/.claude/projects/` — the standard Claude Code usage logs. No external APIs needed.
+Reads JSONL files from `~/.claude/projects/` — standard Claude Code usage logs. No external APIs needed.
+
+## Output
+
+Always serves from `http://localhost:8765`. Cmd+R fetches live data on every reload. The script never creates dated copies — one server, one URL.
