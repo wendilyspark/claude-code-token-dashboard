@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 Claude Code Token Usage Dashboard Generator
-Usage: python generate_dashboard.py [--days N] [--output path/to/dashboard.html]
+Usage: python generate_dashboard.py [--days N] [--port N] [--output path] [--no-open]
 """
 import argparse
+import http.server
 import json
 import os
 import re
@@ -1315,40 +1316,69 @@ obsInline.observe(document.getElementById('pagination-inline'));
 """
 
 
+# ─── Build ────────────────────────────────────────────────────────────────────
+
+def build_html(days: int) -> str:
+    sessions, hourly = parse_projects(days)
+    data = aggregate(sessions, hourly, days)
+    return HTML_TEMPLATE.replace("__DATA__", json.dumps(data, ensure_ascii=False, separators=(',', ':')))
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Generate Claude Code token usage dashboard")
-    parser.add_argument("--days", type=int, default=7, help="Number of days back to load (default: 7, UI filters further)")
-    parser.add_argument("--output", type=str, default=None, help="Output HTML path (default: dashboard.html next to this script)")
-    parser.add_argument("--open", action="store_true", default=True, help="Auto-open the dashboard in the default browser (default: true)")
-    parser.add_argument("--no-open", dest="open", action="store_false", help="Do not auto-open the dashboard")
+    parser.add_argument("--days", type=int, default=7, help="Number of days back to load (default: 7)")
+    parser.add_argument("--port", type=int, default=8765, help="Local server port (default: 8765)")
+    parser.add_argument("--output", type=str, default=None, help="Write static HTML to file and exit (skips server)")
+    parser.add_argument("--open", action="store_true", default=True, help="Auto-open in browser (default: true)")
+    parser.add_argument("--no-open", dest="open", action="store_false", help="Do not auto-open")
     args = parser.parse_args()
 
-    print(f"[1/3] Parsing JSONL files for last {args.days} day(s)...")
-    sessions, hourly = parse_projects(args.days)
-    print(f"      Found {len(sessions)} sessions, {len(hourly)} hourly buckets")
+    # Static file mode (--output): write once and exit
+    if args.output:
+        print(f"Generating static dashboard for last {args.days} day(s)...")
+        html = build_html(args.days)
+        Path(args.output).write_text(html, encoding="utf-8")
+        print(f"✅ Written to: {args.output}")
+        if args.open:
+            subprocess.Popen(["open", args.output], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
 
-    print("[2/3] Aggregating data...")
-    data = aggregate(sessions, hourly, args.days)
-    k = data["kpis"]
-    print(f"      Total cost: ${k['total_cost']:.4f}  |  Tokens: {k['total_tokens']:,}  |  Sessions: {k['unique_sessions']}")
-    print(f"      Cache savings: ${k['total_savings']:.4f}  |  Spikes: {sum(1 for h in data['hourly_series'] if h.get('is_spike'))}")
+    # Server mode (default): regenerate data on every Cmd+R
+    days = args.days
 
-    print("[3/3] Writing dashboard HTML...")
-    script_dir = Path(__file__).parent
-    output_path = Path(args.output) if args.output else script_dir / "dashboard.html"
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/favicon.ico":
+                self.send_response(204)
+                self.end_headers()
+                return
+            html = build_html(days)
+            body = html.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
 
-    html = HTML_TEMPLATE.replace("__DATA__", json.dumps(data, ensure_ascii=False, separators=(',', ':')))
-    output_path.write_text(html, encoding="utf-8")
+        def log_message(self, fmt, *a):
+            pass  # suppress per-request logs
 
-    print(f"\n✅ Dashboard written to: {output_path}")
+    url = f"http://localhost:{args.port}"
+    server = http.server.HTTPServer(("localhost", args.port), Handler)
+    print(f"✅ Dashboard server running at {url}")
+    print(f"   Cmd+R refreshes data live from ~/.claude/projects/")
+    print(f"   Ctrl+C to stop")
 
     if args.open:
-        print("   Opening in browser...")
-        subprocess.Popen(["open", str(output_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    else:
-        print(f"\n   Open with: open \"{output_path}\"")
+        subprocess.Popen(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nServer stopped.")
 
 
 if __name__ == "__main__":
