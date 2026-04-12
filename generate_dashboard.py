@@ -290,7 +290,126 @@ def parse_projects(days: int):
     return sessions, hourly
 
 
-def aggregate(sessions: dict, hourly: dict, days: int = 7):
+PLAN_CAPS = {
+    "pro": 44_000_000,       # ~44M tokens per 5h window (unofficial estimate)
+    "max5x": 88_000_000,     # ~88M tokens per 5h window
+    "max20x": 220_000_000,   # ~220M tokens per 5h window
+}
+
+
+def compute_intensity(sessions: dict, cap: int):
+    """Compute rolling 5-hour token usage windows and usage intensity."""
+    # Collect all messages across all sessions with timestamps
+    all_msgs = []
+    for sid, s in sessions.items():
+        for m in s["messages"]:
+            ts = parse_ts(m["ts"])
+            if ts:
+                all_msgs.append({
+                    "ts": ts,
+                    "tokens": m["total_tokens"],
+                    "session_id": sid,
+                    "slug": s.get("slug") or sid[:8],
+                    "task": s.get("task_description", "")[:120],
+                    "model": m["model"],
+                })
+    if not all_msgs:
+        return {"windows": [], "peaks": [], "heatmap": [[0]*24 for _ in range(7)], "cap": cap}
+
+    all_msgs.sort(key=lambda x: x["ts"])
+
+    # Bin into 15-minute slots
+    slot_tokens = defaultdict(int)   # slot_key → total tokens
+    slot_sessions = defaultdict(set) # slot_key → set of session_ids
+    slot_details = defaultdict(list) # slot_key → list of {slug, task, tokens}
+
+    for m in all_msgs:
+        # Round down to 15-min slot
+        t = m["ts"]
+        minute_slot = (t.minute // 15) * 15
+        slot_key = t.replace(minute=minute_slot, second=0, microsecond=0)
+        slot_tokens[slot_key] += m["tokens"]
+        slot_sessions[slot_key].add(m["session_id"])
+        slot_details[slot_key].append({
+            "slug": m["slug"],
+            "task": m["task"],
+            "tokens": m["tokens"],
+            "model": m["model"],
+        })
+
+    if not slot_tokens:
+        return {"windows": [], "peaks": [], "heatmap": [[0]*24 for _ in range(7)], "cap": cap}
+
+    # Generate rolling 5h windows at 15-min steps
+    sorted_slots = sorted(slot_tokens.keys())
+    min_time = sorted_slots[0]
+    max_time = sorted_slots[-1]
+    window_dur = timedelta(hours=5)
+
+    windows = []
+    current = min_time
+    while current <= max_time:
+        # Sum tokens in [current - 5h, current]
+        window_start = current - window_dur
+        total = 0
+        active_sessions = set()
+        for sk, tk in slot_tokens.items():
+            if window_start < sk <= current:
+                total += tk
+                active_sessions.update(slot_sessions[sk])
+        pct = round(total / cap * 100, 1) if cap > 0 else 0
+        windows.append({
+            "ts": current.isoformat(),
+            "tokens": total,
+            "pct": pct,
+            "sessions": len(active_sessions),
+        })
+        current += timedelta(minutes=15)
+
+    # Identify peak windows (>85% or top by tokens)
+    peaks = []
+    for w in windows:
+        if w["pct"] >= 85:
+            # Find active sessions in this 5h window
+            window_end = parse_ts(w["ts"])
+            window_start = window_end - window_dur
+            session_info = {}
+            for sk, details in slot_details.items():
+                if window_start < sk <= window_end:
+                    for d in details:
+                        if d["slug"] not in session_info:
+                            session_info[d["slug"]] = {"task": d["task"], "tokens": 0, "model": d["model"]}
+                        session_info[d["slug"]]["tokens"] += d["tokens"]
+            peaks.append({
+                "ts": w["ts"],
+                "tokens": w["tokens"],
+                "pct": w["pct"],
+                "sessions": [{"slug": k, **v} for k, v in sorted(session_info.items(), key=lambda x: x[1]["tokens"], reverse=True)[:5]],
+            })
+    # Deduplicate peaks (keep only if >1h apart)
+    deduped_peaks = []
+    for p in sorted(peaks, key=lambda x: x["pct"], reverse=True):
+        pt = parse_ts(p["ts"])
+        if not any(abs((pt - parse_ts(dp["ts"])).total_seconds()) < 3600 for dp in deduped_peaks):
+            deduped_peaks.append(p)
+    deduped_peaks = deduped_peaks[:10]
+
+    # Heatmap: 7 days × 24 hours
+    heatmap = [[0]*24 for _ in range(7)]
+    for m in all_msgs:
+        dow = m["ts"].weekday()  # 0=Mon, 6=Sun
+        hour = m["ts"].hour
+        heatmap[dow][hour] += m["tokens"]
+
+    return {
+        "windows": windows,
+        "peaks": deduped_peaks,
+        "heatmap": heatmap,
+        "cap": cap,
+    }
+
+
+def aggregate(sessions: dict, hourly: dict, days: int = 7, cap: int = 0):
     """Compute final aggregates for the dashboard."""
     session_titles = load_session_titles()   # cliSessionId → human title
 
@@ -412,6 +531,9 @@ def aggregate(sessions: dict, hourly: dict, days: int = 7):
     unique_sessions = len([s for s in session_list if not s["is_subagent"]])
     total_requests = sum(sess["request_count"] for sess in session_list)
 
+    # Usage intensity (rolling 5h windows)
+    intensity = compute_intensity(sessions, cap) if cap > 0 else None
+
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "kpis": {
@@ -431,6 +553,7 @@ def aggregate(sessions: dict, hourly: dict, days: int = 7):
                         for k, v in task_totals.items()},
         "compact_events": all_compact[:20],  # top 20
         "sessions": session_list,
+        "intensity": intensity,
     }
 
 
@@ -564,6 +687,25 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .glossary-card dt { color: var(--blue); font-weight: 600; font-size: 11px; margin-bottom: 5px; }
   .glossary-card dd { color: #8b949e; font-size: 11px; margin: 0; line-height: 1.5; }
 
+  /* Usage Intensity */
+  .intensity-section { margin-top: 28px; }
+  .heatmap-wrap { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 16px; }
+  .heatmap-table { border-collapse: collapse; font-size: 10px; }
+  .heatmap-table th, .heatmap-table td { padding: 4px 6px; text-align: center; min-width: 28px; }
+  .heatmap-table th { color: var(--muted); font-weight: 500; }
+  .heatmap-cell { border-radius: 3px; cursor: default; }
+  .peak-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; margin-top: 12px; }
+  .peak-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+  .peak-card.critical { border-color: var(--red); }
+  .peak-card .peak-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .peak-card .peak-pct { font-size: 20px; font-weight: 700; }
+  .peak-card .peak-pct.warn { color: var(--yellow); }
+  .peak-card .peak-pct.danger { color: var(--red); }
+  .peak-card .peak-time { color: var(--muted); font-size: 11px; }
+  .peak-card .peak-sessions { font-size: 11px; color: var(--muted); }
+  .peak-card .peak-sessions li { margin: 3px 0; }
+  .peak-card .peak-sessions .slug { color: var(--blue); font-weight: 500; }
+
   /* View buttons & date picker */
   .view-btns { display:flex; gap:3px; }
   .view-btn { background:var(--bg3); border:1px solid var(--border); color:var(--muted); border-radius:5px; padding:3px 10px; font-size:11px; cursor:pointer; transition:all .15s; }
@@ -633,6 +775,25 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       </div>
     </div>
     <canvas id="tsChart"></canvas>
+  </div>
+
+  <!-- Usage Intensity -->
+  <div id="intensity-section" class="intensity-section" style="display:none">
+    <div class="section-title">Usage Intensity <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;font-size:11px">— rolling 5h window vs estimated plan cap</span></div>
+    <div class="chart-card">
+      <h3>Rolling 5-Hour Token Usage</h3>
+      <canvas id="intensityChart"></canvas>
+    </div>
+    <div class="heatmap-wrap">
+      <div class="chart-card" style="flex:1;min-width:300px">
+        <h3>Weekly Usage Heatmap <span style="color:var(--muted);font-weight:400;font-size:11px">— tokens by day &amp; hour</span></h3>
+        <div id="heatmap-container"></div>
+      </div>
+      <div class="chart-card" style="flex:1;min-width:300px">
+        <h3 id="peaks-title">Peak Windows</h3>
+        <div class="peak-cards" id="peak-cards"></div>
+      </div>
+    </div>
   </div>
 
   <!-- Model + Task charts -->
@@ -1293,6 +1454,161 @@ const obsInline = new IntersectionObserver(([e]) => {
 }, { threshold: 0 });
 obsToggle.observe(toggleRowEl);
 obsInline.observe(document.getElementById('pagination-inline'));
+
+// ─── Usage Intensity ──────────────────────────────────────────────────────────
+(function() {
+  const intensity = DATA.intensity;
+  if (!intensity || !intensity.windows || intensity.windows.length === 0) return;
+
+  document.getElementById('intensity-section').style.display = '';
+  const cap = intensity.cap;
+
+  // Rolling 5h chart
+  const labels = intensity.windows.map(w => {
+    const d = new Date(w.ts);
+    return d.toLocaleDateString('en-US', {month:'short',day:'numeric'}) + ' ' + d.toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit',hour12:false});
+  });
+  const pcts = intensity.windows.map(w => w.pct);
+  const tokens = intensity.windows.map(w => w.tokens);
+
+  const ctx = document.getElementById('intensityChart').getContext('2d');
+  new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Usage %',
+        data: pcts,
+        borderColor: pcts.map(p => p >= 85 ? '#f85149' : p >= 60 ? '#d29922' : '#58a6ff'),
+        backgroundColor: (context) => {
+          const chart = context.chart;
+          const {ctx: c, chartArea} = chart;
+          if (!chartArea) return 'rgba(88,166,255,0.1)';
+          const g = c.createLinearGradient(0, chartArea.bottom, 0, chartArea.top);
+          g.addColorStop(0, 'rgba(88,166,255,0.02)');
+          g.addColorStop(0.6, 'rgba(88,166,255,0.08)');
+          g.addColorStop(0.85, 'rgba(210,153,34,0.15)');
+          g.addColorStop(1, 'rgba(248,81,73,0.2)');
+          return g;
+        },
+        fill: true,
+        borderWidth: 1.5,
+        pointRadius: 0,
+        pointHitRadius: 8,
+        tension: 0.3,
+        segment: {
+          borderColor: (ctx2) => {
+            const v = pcts[ctx2.p1DataIndex];
+            return v >= 85 ? '#f85149' : v >= 60 ? '#d29922' : '#58a6ff';
+          }
+        }
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { display: false },
+        annotation: undefined,
+        tooltip: {
+          callbacks: {
+            label: (ctx2) => {
+              const i = ctx2.dataIndex;
+              const t = tokens[i];
+              return `${pcts[i]}% of cap (${fmt_tokens(t)})`;
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: '#8b949e', font: { size: 9 }, maxTicksLimit: 12, maxRotation: 45 },
+          grid: { color: 'rgba(48,54,61,0.5)' }
+        },
+        y: {
+          min: 0,
+          ticks: { color: '#8b949e', font: { size: 10 }, callback: v => v + '%' },
+          grid: { color: 'rgba(48,54,61,0.5)' }
+        }
+      }
+    },
+    plugins: [{
+      id: 'thresholdLine',
+      afterDraw(chart) {
+        const yAxis = chart.scales.y;
+        const y85 = yAxis.getPixelForValue(85);
+        const ctx3 = chart.ctx;
+        ctx3.save();
+        ctx3.strokeStyle = '#f85149';
+        ctx3.lineWidth = 1;
+        ctx3.setLineDash([6, 4]);
+        ctx3.beginPath();
+        ctx3.moveTo(chart.chartArea.left, y85);
+        ctx3.lineTo(chart.chartArea.right, y85);
+        ctx3.stroke();
+        ctx3.fillStyle = '#f85149';
+        ctx3.font = '10px sans-serif';
+        ctx3.fillText('85% threshold', chart.chartArea.right - 80, y85 - 4);
+        ctx3.restore();
+      }
+    }]
+  });
+
+  // Heatmap
+  const hm = intensity.heatmap;
+  const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const maxVal = Math.max(...hm.flat().filter(v => v > 0), 1);
+  let html = '<table class="heatmap-table"><thead><tr><th></th>';
+  for (let h = 0; h < 24; h++) html += `<th>${h}</th>`;
+  html += '</tr></thead><tbody>';
+  for (let d = 0; d < 7; d++) {
+    html += `<tr><th>${days[d]}</th>`;
+    for (let h = 0; h < 24; h++) {
+      const v = hm[d][h];
+      const intensity2 = v / maxVal;
+      let color;
+      if (v === 0) color = 'transparent';
+      else if (intensity2 < 0.3) color = `rgba(88,166,255,${0.15 + intensity2})`;
+      else if (intensity2 < 0.7) color = `rgba(210,153,34,${0.2 + intensity2 * 0.5})`;
+      else color = `rgba(248,81,73,${0.3 + intensity2 * 0.5})`;
+      const title = v > 0 ? `${days[d]} ${h}:00 — ${fmt_tokens(v)}` : '';
+      html += `<td class="heatmap-cell" style="background:${color}" title="${title}"></td>`;
+    }
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  document.getElementById('heatmap-container').innerHTML = html;
+
+  // Peak windows
+  const peaks = intensity.peaks;
+  if (peaks.length === 0) {
+    document.getElementById('peaks-title').textContent = 'Peak Windows — none above 85%';
+    document.getElementById('peak-cards').innerHTML = '<div style="color:var(--muted);font-size:12px;padding:12px">No 5-hour windows exceeded 85% of estimated plan cap.</div>';
+  } else {
+    document.getElementById('peaks-title').textContent = `Peak Windows — ${peaks.length} above 85%`;
+    let peakHtml = '';
+    peaks.forEach(p => {
+      const d = new Date(p.ts);
+      const timeStr = d.toLocaleDateString('en-US', {month:'short',day:'numeric'}) + ' ' + d.toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit',hour12:false});
+      const cls = p.pct >= 100 ? 'critical' : '';
+      const pctCls = p.pct >= 100 ? 'danger' : 'warn';
+      let sessHtml = '';
+      if (p.sessions && p.sessions.length) {
+        sessHtml = '<ul class="peak-sessions">' + p.sessions.map(s =>
+          `<li><span class="slug">${s.slug}</span> — ${fmt_tokens(s.tokens)} — ${s.task.substring(0,80)}</li>`
+        ).join('') + '</ul>';
+      }
+      peakHtml += `<div class="peak-card ${cls}">
+        <div class="peak-header">
+          <span class="peak-pct ${pctCls}">${p.pct}%</span>
+          <span class="peak-time">${timeStr}</span>
+        </div>
+        <div style="color:var(--muted);font-size:11px;margin-bottom:6px">${fmt_tokens(p.tokens)} in 5h window</div>
+        ${sessHtml}
+      </div>`;
+    });
+    document.getElementById('peak-cards').innerHTML = peakHtml;
+  }
+})();
 </script>
 
 <div class="container">
@@ -1318,9 +1634,9 @@ obsInline.observe(document.getElementById('pagination-inline'));
 
 # ─── Build ────────────────────────────────────────────────────────────────────
 
-def build_html(days: int) -> str:
+def build_html(days: int, cap: int = 0) -> str:
     sessions, hourly = parse_projects(days)
-    data = aggregate(sessions, hourly, days)
+    data = aggregate(sessions, hourly, days, cap)
     return HTML_TEMPLATE.replace("__DATA__", json.dumps(data, ensure_ascii=False, separators=(',', ':')))
 
 
@@ -1331,14 +1647,19 @@ def main():
     parser.add_argument("--days", type=int, default=7, help="Number of days back to load (default: 7)")
     parser.add_argument("--port", type=int, default=8765, help="Local server port (default: 8765)")
     parser.add_argument("--output", type=str, default=None, help="Write static HTML to file and exit (skips server)")
+    parser.add_argument("--plan", type=str, default="max5x", choices=["pro", "max5x", "max20x"],
+                        help="Subscription plan for usage intensity tracking (default: max5x)")
+    parser.add_argument("--cap", type=int, default=None, help="Custom token cap per 5h window (overrides --plan)")
     parser.add_argument("--open", action="store_true", default=True, help="Auto-open in browser (default: true)")
     parser.add_argument("--no-open", dest="open", action="store_false", help="Do not auto-open")
     args = parser.parse_args()
 
+    cap = args.cap if args.cap else PLAN_CAPS.get(args.plan, 0)
+
     # Static file mode (--output): write once and exit
     if args.output:
         print(f"Generating static dashboard for last {args.days} day(s)...")
-        html = build_html(args.days)
+        html = build_html(args.days, cap)
         Path(args.output).write_text(html, encoding="utf-8")
         print(f"✅ Written to: {args.output}")
         if args.open:
@@ -1354,7 +1675,7 @@ def main():
                 self.send_response(204)
                 self.end_headers()
                 return
-            html = build_html(days)
+            html = build_html(days, cap)
             body = html.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
