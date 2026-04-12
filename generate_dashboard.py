@@ -775,7 +775,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <canvas id="intensityChart"></canvas>
     </div>
     <div class="chart-card" style="margin-top:12px">
-      <h3>Weekly Usage Heatmap <span style="color:var(--muted);font-weight:400;font-size:11px">— tokens by day &amp; hour</span></h3>
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+        <h3 style="margin:0">Usage Heatmap <span style="color:var(--muted);font-weight:400;font-size:11px">— tokens by day &amp; hour vs plan cap</span></h3>
+        <div style="display:flex;align-items:center;gap:6px">
+          <input type="date" id="hm-from" class="date-input" title="From">
+          <span style="color:var(--muted);font-size:11px">→</span>
+          <input type="date" id="hm-to" class="date-input" title="To">
+          <button class="view-btn" id="hm-apply">Apply</button>
+        </div>
+      </div>
       <div id="heatmap-container"></div>
     </div>
     <div id="peak-events-section" style="margin-top:12px">
@@ -1122,29 +1130,81 @@ document.getElementById('date-apply').addEventListener('click', () => {
 
 // ── Model Chart ─────────────────────────────────────────────────────
 const modelData = DATA.model_totals;
-const modelNames = Object.keys(modelData).sort((a,b) => modelData[b].cost - modelData[a].cost);
+const modelNames = Object.keys(modelData)
+  .filter(m => m !== '<synthetic>')
+  .sort((a,b) => modelData[b].cost - modelData[a].cost);
 const modelCtx = document.getElementById('modelChart').getContext('2d');
 new Chart(modelCtx, {
   type: 'bar',
   data: {
     labels: modelNames.map(short_model),
     datasets: [
-      { label: 'Cost ($)', data: modelNames.map(m => modelData[m].cost), backgroundColor: modelNames.map(m => model_color(m)+'99'), borderColor: modelNames.map(m => model_color(m)), borderWidth:1, yAxisID:'y' },
-      { label: 'Tokens', data: modelNames.map(m => modelData[m].tokens), backgroundColor: 'rgba(255,255,255,0.05)', borderColor: '#30363d', borderWidth:1, yAxisID:'y2', type:'bar' },
+      {
+        label: 'Cost ($)',
+        type: 'bar',
+        data: modelNames.map(m => modelData[m].cost),
+        backgroundColor: modelNames.map(m => model_color(m) + '99'),
+        borderColor: modelNames.map(m => model_color(m)),
+        borderWidth: 1,
+        xAxisID: 'xCost',
+        order: 2,
+      },
+      {
+        label: 'Tokens',
+        type: 'line',
+        data: modelNames.map(m => modelData[m].tokens),
+        borderColor: 'transparent',
+        backgroundColor: '#8b949e',
+        pointBackgroundColor: modelNames.map(m => model_color(m)),
+        pointBorderColor: modelNames.map(m => model_color(m)),
+        pointRadius: 6,
+        pointHoverRadius: 8,
+        pointStyle: 'circle',
+        showLine: false,
+        xAxisID: 'xTokens',
+        order: 1,
+      }
     ]
   },
   options: {
-    indexAxis: 'y', responsive: true, maintainAspectRatio: true,
-    plugins: { legend: { labels: { color:'#8b949e', font:{size:11} } },
-               tooltip: { callbacks: { afterBody: items => {
-                 const m = modelNames[items[0]?.dataIndex];
-                 if (!m) return [];
-                 return [`Requests: ${modelData[m].requests}`, `Tokens: ${fmt_tokens(modelData[m].tokens)}`];
-               }}} },
+    indexAxis: 'y',
+    responsive: true,
+    maintainAspectRatio: true,
+    plugins: {
+      legend: { labels: { color: '#e6edf3', font: { size: 11 }, boxWidth: 32, boxHeight: 10 } },
+      tooltip: {
+        callbacks: {
+          label: item => {
+            const m = modelNames[item.dataIndex];
+            if (!m) return '';
+            if (item.datasetIndex === 0) return ` Cost: $${modelData[m].cost.toFixed(4)}`;
+            return ` Tokens: ${fmt_tokens(modelData[m].tokens)}`;
+          },
+          afterLabel: item => {
+            const m = modelNames[item.dataIndex];
+            if (!m || item.datasetIndex !== 0) return [];
+            return [`Requests: ${modelData[m].requests}`];
+          }
+        }
+      }
+    },
     scales: {
-      x: { ticks:{color:'#8b949e',font:{size:9}}, grid:{color:'#21262d'} },
-      y: { ticks:{color:'#e6edf3',font:{size:11}}, grid:{color:'#21262d'}, position:'left' },
-      y2: { position:'right', ticks:{color:'#8b949e',font:{size:9}, callback: v => fmt_tokens(v)}, grid:{drawOnChartArea:false} }
+      xCost: {
+        position: 'top',
+        ticks: { color: '#bc8cff', font: { size: 9 }, callback: v => '$' + v.toFixed(2) },
+        grid: { color: '#21262d' },
+        title: { display: true, text: 'Cost ($)', color: '#bc8cff', font: { size: 10 } }
+      },
+      xTokens: {
+        position: 'bottom',
+        ticks: { color: '#8b949e', font: { size: 9 }, callback: v => fmt_tokens(v) },
+        grid: { color: '#21262d', drawOnChartArea: false },
+        title: { display: true, text: 'Tokens', color: '#8b949e', font: { size: 10 } }
+      },
+      y: {
+        ticks: { color: '#e6edf3', font: { size: 11 } },
+        grid: { color: '#21262d' }
+      }
     }
   }
 });
@@ -1611,54 +1671,91 @@ function renderIntensityChart(fromDate, toDate) {
   // Sync initial render with whatever view is active in the token usage chart
   renderIntensityChart(getViewConfig(currentView).cutoff, null);
 
-  // Heatmap
-  const hm = intensity.heatmap;
-  const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-  const maxVal = Math.max(...hm.flat().filter(v => v > 0), 1);
-  let html = '<table class="heatmap-table"><thead><tr><th></th>';
-  for (let h = 0; h < 24; h++) html += `<th>${h}</th>`;
-  html += '</tr></thead><tbody>';
-  for (let d = 0; d < 7; d++) {
-    html += `<tr><th>${days[d]}</th>`;
-    for (let h = 0; h < 24; h++) {
-      const v = hm[d][h];
-      const intensity2 = v / maxVal;
-      let color;
-      if (v === 0) color = 'transparent';
-      else if (intensity2 < 0.3) color = `rgba(88,166,255,${0.15 + intensity2})`;
-      else if (intensity2 < 0.7) color = `rgba(210,153,34,${0.2 + intensity2 * 0.5})`;
-      else color = `rgba(248,81,73,${0.3 + intensity2 * 0.5})`;
-      const title = v > 0 ? `${days[d]} ${h}:00 — ${fmt_tokens(v)}` : '';
-      html += `<td class="heatmap-cell" style="background:${color}" title="${title}"></td>`;
-    }
-    html += '</tr>';
+  // Heatmap — rendered client-side from hourly_series, colored by % of hourly plan cap
+  const hmCap = intensity.cap || 0;
+  const hourlyCapTokens = hmCap > 0 ? hmCap / 5 : 0;
+  const dayNames = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+
+  function renderHeatmapRange(fromDate, toDate) {
+    const grid = Array.from({length: 7}, () => new Array(24).fill(0));
+    const counts = Array.from({length: 7}, () => new Array(24).fill(0));
+    DATA.hourly_series.forEach(h => {
+      const d = new Date(h.hour);
+      if (fromDate && d < fromDate) return;
+      if (toDate && d > toDate) return;
+      const dow = (d.getDay() + 6) % 7;
+      const hr = d.getHours();
+      grid[dow][hr] += h.tokens;
+      counts[dow][hr]++;
+    });
+    for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++)
+      if (counts[d][h] > 1) grid[d][h] = Math.round(grid[d][h] / counts[d][h]);
+    _drawHeatmap(grid);
   }
-  html += '</tbody></table>';
-  html += `<div style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:10px;color:var(--muted);flex-wrap:wrap">
-    <span style="opacity:0.7">Token volume:</span>
-    <div style="display:flex;align-items:center;gap:3px">
-      <div style="width:14px;height:14px;border-radius:3px;background:rgba(88,166,255,0.25)"></div>
-      <span>&lt;30%</span>
-    </div>
-    <div style="display:flex;align-items:center;gap:3px">
-      <div style="width:14px;height:14px;border-radius:3px;background:rgba(88,166,255,0.55)"></div>
-      <span>30–60%</span>
-    </div>
-    <div style="display:flex;align-items:center;gap:3px">
-      <div style="width:14px;height:14px;border-radius:3px;background:rgba(210,153,34,0.45)"></div>
-      <span>60–85%</span>
-    </div>
-    <div style="display:flex;align-items:center;gap:3px">
-      <div style="width:14px;height:14px;border-radius:3px;background:rgba(210,153,34,0.85)"></div>
-      <span>85–100%</span>
-    </div>
-    <div style="display:flex;align-items:center;gap:3px">
-      <div style="width:14px;height:14px;border-radius:3px;background:rgba(248,81,73,0.95)"></div>
-      <span>&gt;100%</span>
-    </div>
-    <span style="margin-left:6px;opacity:0.5">— of peak hour · hover for token count</span>
-  </div>`;
-  document.getElementById('heatmap-container').innerHTML = html;
+
+  function renderHeatmap(nDays) {
+    const now = Date.now();
+    const cutoffMs = nDays > 0 ? now - nDays * 86400000 : 0;
+    const grid = Array.from({length: 7}, () => new Array(24).fill(0));
+    const counts = Array.from({length: 7}, () => new Array(24).fill(0));
+    DATA.hourly_series.forEach(h => {
+      const d = new Date(h.hour);
+      if (cutoffMs && d.getTime() < cutoffMs) return;
+      const dow = (d.getDay() + 6) % 7;
+      const hr = d.getHours();
+      grid[dow][hr] += h.tokens;
+      counts[dow][hr]++;
+    });
+    for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++)
+      if (counts[d][h] > 1) grid[d][h] = Math.round(grid[d][h] / counts[d][h]);
+    _drawHeatmap(grid);
+  }
+
+  function _drawHeatmap(grid) {
+    let html = '<table class="heatmap-table"><thead><tr><th></th>';
+    for (let h = 0; h < 24; h++) html += `<th>${h}</th>`;
+    html += '</tr></thead><tbody>';
+    for (let d = 0; d < 7; d++) {
+      html += `<tr><th>${dayNames[d]}</th>`;
+      for (let h = 0; h < 24; h++) {
+        const v = grid[d][h];
+        const pct = hourlyCapTokens > 0 ? v / hourlyCapTokens * 100 : 0;
+        let color;
+        if (v === 0) color = 'transparent';
+        else if (pct < 30)  color = `rgba(88,166,255,${0.15 + pct/100})`;
+        else if (pct < 75)  color = `rgba(210,153,34,${0.25 + pct/200})`;
+        else if (pct < 100) color = `rgba(210,153,34,${0.65 + pct/400})`;
+        else                color = `rgba(248,81,73,${Math.min(0.9 + (pct-100)/200, 1)})`;
+        const capStr = hourlyCapTokens > 0 ? ` · ${pct.toFixed(1)}% of hrly cap` : '';
+        const title = v > 0 ? `${dayNames[d]} ${h}:00 — ${fmt_tokens(v)}${capStr}` : '';
+        html += `<td class="heatmap-cell" style="background:${color}" title="${title}"></td>`;
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    html += `<div style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:10px;color:var(--muted);flex-wrap:wrap">
+      <span style="opacity:0.7">% of hourly cap:</span>
+      <div style="display:flex;align-items:center;gap:3px"><div style="width:14px;height:14px;border-radius:3px;background:rgba(88,166,255,0.35)"></div><span>&lt;30%</span></div>
+      <div style="display:flex;align-items:center;gap:3px"><div style="width:14px;height:14px;border-radius:3px;background:rgba(210,153,34,0.50)"></div><span>30–75%</span></div>
+      <div style="display:flex;align-items:center;gap:3px"><div style="width:14px;height:14px;border-radius:3px;background:rgba(210,153,34,0.85)"></div><span>75–100%</span></div>
+      <div style="display:flex;align-items:center;gap:3px"><div style="width:14px;height:14px;border-radius:3px;background:rgba(248,81,73,0.92)"></div><span>&gt;100%</span></div>
+      <span style="margin-left:6px;opacity:0.5">— avg tokens/hr · hover for details</span>
+    </div>`;
+    document.getElementById('heatmap-container').innerHTML = html;
+  }
+
+  // Default: last 7 days
+  const hmDefaultFrom = new Date(Date.now() - 7*86400000);
+  document.getElementById('hm-from').value = hmDefaultFrom.toISOString().slice(0,10);
+  renderHeatmap(7);
+
+  document.getElementById('hm-apply').addEventListener('click', () => {
+    const from = document.getElementById('hm-from').value;
+    const to = document.getElementById('hm-to').value;
+    const fromDate = from ? new Date(from + 'T00:00:00') : null;
+    const toDate = to ? new Date(to + 'T23:59:59') : null;
+    renderHeatmapRange(fromDate, toDate);
+  });
 
   // Peak windows — rendered as event-cards with modals (matching spike/compact format)
   const peaks = intensity.peaks;
