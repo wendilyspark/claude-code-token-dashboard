@@ -616,7 +616,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .section-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 12px; margin-top: 24px; }
 
   /* KPI cards */
-  .kpi-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
   @media (max-width: 900px) { .kpi-grid { grid-template-columns: repeat(2, 1fr); } }
   .kpi-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; }
   .kpi-card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
@@ -805,11 +805,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
         <h3 style="margin:0">Usage Heatmap <span style="color:var(--muted);font-weight:400;font-size:11px">— tokens by day &amp; hour vs plan cap</span></h3>
         <div style="display:flex;align-items:center;gap:6px">
+          <div class="view-btns">
+            <button class="view-btn active" id="hm-current">Current</button>
+          </div>
           <input type="date" id="hm-from" class="date-input" title="From">
           <span style="color:var(--muted);font-size:11px">→</span>
           <input type="date" id="hm-to" class="date-input" title="To">
           <button class="view-btn" id="hm-apply">Apply</button>
-          <button class="view-btn" id="hm-current">Current</button>
         </div>
       </div>
       <div id="heatmap-container"></div>
@@ -947,7 +949,6 @@ const kpi_defs = [
   { label: 'Tokens / Day', value: fmt_tokens(Math.round(k.total_tokens / k.days_in_window)), sub: k.days_in_window + '-day avg', cls: 'tokens' },
   { label: 'Sessions', value: k.unique_sessions, sub: 'Main (excl. subagents)', cls: '' },
   { label: 'Tokens / Session', value: fmt_tokens(k.avg_tokens_per_session), sub: 'avg per main session', cls: '' },
-  { label: 'Cache Savings', value: fmt_kpi_cost(k.total_savings), sub: 'vs no-cache baseline', cls: 'savings' },
 ];
 const kpiGrid = document.getElementById('kpi-cards');
 kpi_defs.forEach(d => {
@@ -1108,7 +1109,23 @@ function renderChart(view, fromDate, toDate) {
       }}}
     },
     scales: {
-      x: { offset: false, ticks: { color:'#8b949e', font:{size:9}, maxRotation:45, maxTicksLimit: maxTicks, autoSkip: true }, grid:{color:'#21262d'} },
+      x: {
+        offset: false,
+        ticks: { color:'#8b949e', font:{size:9}, maxRotation:45, autoSkip: false },
+        grid: { color:'#21262d' },
+        afterBuildTicks(scale) {
+          if (granularity !== 'hour') return;
+          const firstMid = labels.findIndex(l => l.endsWith(' 00:00'));
+          if (firstMid === -1) return;
+          const niceSteps = [1,2,3,4,6,8,12,24];
+          const rawStep = labels.length / maxTicks;
+          const step = niceSteps.find(s => s >= rawStep) || 24;
+          const ticks = [];
+          for (let i = firstMid; i < labels.length; i += step) ticks.push({ value: i });
+          for (let i = firstMid - step; i >= 0; i -= step) ticks.unshift({ value: i });
+          scale.ticks = ticks;
+        }
+      },
       y: { ticks: { color:'#8b949e', font:{size:10}, callback: v => { const r = Math.round(v); return r >= 1e6 ? Math.round(r/1e6)+'M' : r >= 1e3 ? Math.round(r/1e3)+'K' : r; } }, grid:{ drawOnChartArea: false } }
     }
   };
@@ -1616,7 +1633,7 @@ function renderIntensityChart(chartMeta) {
   const intensity = DATA.intensity;
   if (!intensity) return;
 
-  const { labels, bucketMs, maxTicks } = chartMeta;
+  const { labels, bucketMs, maxTicks, granularity } = chartMeta;
 
   // Aggregate 15-min intensity windows into hourly slots (keyed by hour-aligned ms)
   const aggregated = {};
@@ -1705,8 +1722,20 @@ function renderIntensityChart(chartMeta) {
       },
       scales: {
         x: {
-          ticks: { color: '#8b949e', font: { size: 9 }, maxTicksLimit: maxTicks, maxRotation: 45, autoSkip: true },
-          grid: { color: 'rgba(48,54,61,0.5)' }
+          ticks: { color: '#8b949e', font: { size: 9 }, maxRotation: 45, autoSkip: false },
+          grid: { color: 'rgba(48,54,61,0.5)' },
+          afterBuildTicks(scale) {
+            if (granularity !== 'hour') return;
+            const firstMid = labels.findIndex(l => l.endsWith(' 00:00'));
+            if (firstMid === -1) return;
+            const niceSteps = [1,2,3,4,6,8,12,24];
+            const rawStep = labels.length / maxTicks;
+            const step = niceSteps.find(s => s >= rawStep) || 24;
+            const ticks = [];
+            for (let i = firstMid; i < labels.length; i += step) ticks.push({ value: i });
+            for (let i = firstMid - step; i >= 0; i -= step) ticks.unshift({ value: i });
+            scale.ticks = ticks;
+          }
         },
         y: {
           min: 0,
@@ -1859,13 +1888,15 @@ function renderIntensityChart(chartMeta) {
     const to = document.getElementById('hm-to').value;
     const fromDate = from ? new Date(from + 'T00:00:00') : null;
     const toDate = to ? new Date(to + 'T23:59:59') : null;
+    document.getElementById('hm-current').classList.remove('active');
     renderHeatmapRange(fromDate, toDate);
   });
 
   document.getElementById('hm-current').addEventListener('click', () => {
     const hmDefaultFrom = new Date(Date.now() - 7*86400000);
-    document.getElementById('hm-from').value = hmDefaultFrom.toLocaleDateString('en-CA');  // YYYY-MM-DD in local tz
+    document.getElementById('hm-from').value = hmDefaultFrom.toLocaleDateString('en-CA');
     document.getElementById('hm-to').value = '';
+    document.getElementById('hm-current').classList.add('active');
     renderHeatmap(7);
   });
 
@@ -1877,10 +1908,10 @@ function renderIntensityChart(chartMeta) {
     peakSection.style.display = 'none';
   } else {
     peaks.forEach(p => {
-      const d = new Date(p.ts);
+      const d = new Date(Math.floor(new Date(p.ts).getTime() / 3600000) * 3600000);
       const timeStr = d.toLocaleDateString('en-US', {month:'short',day:'numeric'}) + ' ' + d.toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit',hour12:false});
       const onclickData = JSON.stringify({
-        ts: p.ts, pct: p.pct, tokens: p.tokens,
+        ts: new Date(Math.floor(new Date(p.ts).getTime() / 3600000) * 3600000).toISOString(), pct: p.pct, tokens: p.tokens,
         sessions: (p.sessions||[]).map(s => ({slug:s.slug, tokens:s.tokens, model:s.model, task:s.task}))
       }).replace(/'/g, "&#39;");
       peakGrid.innerHTML += `<div class="event-card peak" onclick='openPeakModal(${onclickData})'>

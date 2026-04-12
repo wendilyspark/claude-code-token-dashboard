@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "token-dashboard",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["~/.claude/skills/token-dashboard/generate_dashboard.py", "--no-open"],
+      "port": 8765
+    }
+  ]
+}
