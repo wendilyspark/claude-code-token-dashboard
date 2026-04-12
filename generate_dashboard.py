@@ -1062,6 +1062,7 @@ function renderChart(view, fromDate, toDate) {
       backgroundColor: buckets.map(b => b.spikes ? 'rgba(248,81,73,0.75)' : 'rgba(88,166,255,0.55)'),
       borderColor: buckets.map(b => b.spikes ? '#f85149' : '#58a6ff'),
       borderWidth: 1,
+      yAxisID: 'y',
     }, {
       type: 'line',
       label: 'Cost ($)',
@@ -1089,14 +1090,37 @@ function renderChart(view, fromDate, toDate) {
     },
     scales: {
       x: { ticks: { color:'#8b949e', font:{size:9}, maxRotation:45, maxTicksLimit: maxTicks, autoSkip: true }, grid:{color:'#21262d'} },
-      y: { ticks: { color:'#8b949e', font:{size:10}, callback: v => fmt_tokens(v) }, grid:{color:'#21262d'}, title:{display:true,text:'Tokens',color:'#8b949e',font:{size:10}} },
-      y2: { position:'right', ticks:{color:'#ffa657',font:{size:10},callback:v=>'$'+v.toFixed(2)}, grid:{drawOnChartArea:false}, title:{display:true,text:'Cost ($)',color:'#ffa657',font:{size:10}} }
+      y: { ticks: { color:'#8b949e', font:{size:10}, callback: v => { const r = Math.round(v); return r >= 1e6 ? Math.round(r/1e6)+'M' : r >= 1e3 ? Math.round(r/1e3)+'K' : r; } }, grid:{color:'#21262d'} },
+      y2: { position:'right', ticks:{color:'#ffa657',font:{size:10},callback:v=>'$'+Math.round(v)}, grid:{drawOnChartArea:false} }
+    }
+  };
+
+  const axisLabelPlugin = {
+    id: 'axisLabels',
+    afterDraw(chart) {
+      const ctx = chart.ctx;
+      const yL = chart.scales.y;
+      const yR = chart.scales.y2;
+      ctx.save();
+      ctx.font = '10px sans-serif';
+      ctx.textBaseline = 'bottom';
+      if (yL) {
+        ctx.fillStyle = '#8b949e';
+        ctx.textAlign = 'left';
+        ctx.fillText('Tokens', yL.left, yL.top - 10);
+      }
+      if (yR) {
+        ctx.fillStyle = '#ffa657';
+        ctx.textAlign = 'right';
+        ctx.fillText('Cost ($)', yR.right, yR.top - 10);
+      }
+      ctx.restore();
     }
   };
 
   const tsCtx = document.getElementById('tsChart').getContext('2d');
   if (tsChart) { tsChart.destroy(); }
-  tsChart = new Chart(tsCtx, { type:'bar', data: chartData, options: opts });
+  tsChart = new Chart(tsCtx, { type:'bar', data: chartData, options: opts, plugins: [axisLabelPlugin] });
 }
 
 // Init default 3D view
@@ -1171,7 +1195,14 @@ new Chart(modelCtx, {
     responsive: true,
     maintainAspectRatio: true,
     plugins: {
-      legend: { labels: { color: '#e6edf3', font: { size: 11 }, boxWidth: 32, boxHeight: 10 } },
+      legend: { labels: { color: '#e6edf3', font: { size: 11 }, boxWidth: 32, boxHeight: 10, padding: 24,
+        generateLabels: chart => chart.data.datasets.map((ds, i) => ({
+          text: ds.label, datasetIndex: i, hidden: !chart.isDatasetVisible(i),
+          fillStyle: '#8b949e', strokeStyle: 'transparent', lineWidth: 0,
+          pointStyle: i === 1 ? 'circle' : 'rect',
+          fontColor: '#e6edf3',
+        }))
+      } },
       tooltip: {
         callbacks: {
           label: item => {
