@@ -291,9 +291,9 @@ def parse_projects(days: int):
 
 
 PLAN_CAPS = {
-    "pro": 44_000_000,       # ~44M tokens per 5h window (unofficial estimate)
-    "max5x": 88_000_000,     # ~88M tokens per 5h window
-    "max20x": 220_000_000,   # ~220M tokens per 5h window
+    "pro": 44_000_000,        # ~44M tokens per 5h window (unofficial estimate)
+    "max5x": 210_000_000,     # ~210M tokens per 5h window (calibrated from actual usage data)
+    "max20x": 440_000_000,    # ~440M tokens per 5h window (10× Pro estimate)
 }
 
 
@@ -1102,7 +1102,9 @@ document.querySelectorAll('.view-btn[data-view]').forEach(btn => {
     currentView = btn.dataset.view;
     document.getElementById('date-from').value = '';
     document.getElementById('date-to').value = '';
+    const { cutoff } = getViewConfig(btn.dataset.view);
     renderChart(currentView);
+    renderIntensityChart(cutoff, null);
   });
 });
 
@@ -1110,12 +1112,12 @@ document.querySelectorAll('.view-btn[data-view]').forEach(btn => {
 document.getElementById('date-apply').addEventListener('click', () => {
   const from = document.getElementById('date-from').value;
   const to = document.getElementById('date-to').value;
-  if (!from && !to) return renderChart(currentView);
+  if (!from && !to) { renderChart(currentView); const {cutoff} = getViewConfig(currentView); renderIntensityChart(cutoff, null); return; }
   document.querySelectorAll('.view-btn[data-view]').forEach(b => b.classList.remove('active'));
   const fromDate = from ? new Date(from + 'T00:00:00') : null;
   const toDate = to ? new Date(to + 'T23:59:59') : new Date();
-  const gran = fromDate && toDate && (toDate - fromDate) > 30*86400000 ? 'day' : 'hour';
   renderChart('custom', fromDate, toDate);
+  renderIntensityChart(fromDate, toDate);
 });
 
 // ── Model Chart ─────────────────────────────────────────────────────
@@ -1466,43 +1468,73 @@ function openPeakModal(d) {
     <div style="margin:14px 0 8px;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:0.05em">Active Sessions During This Window</div>
     ${sessRows || '<div style="color:var(--muted);font-size:12px">No session details available</div>'}
     <div class="modal-row" style="margin-top:14px;color:var(--muted);font-size:11px">
-      This is a rolling 5-hour window. Usage above 85% may trigger rate limiting on your subscription plan.
+      This is a rolling 5-hour window. Usage above 100% of estimated cap may trigger rate limiting on your subscription plan.
     </div>
   `);
 }
 
-(function() {
+let intensityChart = null;
+
+function renderIntensityChart(fromDate, toDate) {
   const intensity = DATA.intensity;
-  if (!intensity || !intensity.windows || intensity.windows.length === 0) return;
+  if (!intensity) return;
 
-  document.getElementById('intensity-section').style.display = '';
-  const cap = intensity.cap;
+  const allWindows = intensity.windows || [];
+  const now = new Date();
+  const end = toDate || now;
+  const start = fromDate || (allWindows.length > 0 ? new Date(allWindows[0].ts) : new Date(now - 7*86400000));
 
-  // Rolling 5h chart
-  const labels = intensity.windows.map(w => {
+  // Build a lookup: ISO ts (rounded to 15min) -> window data
+  const windowMap = {};
+  allWindows.forEach(w => { windowMap[w.ts] = w; });
+
+  // Decide slot size: ≤7d → 15min, ≤30d → 1h, else → 6h
+  const rangeMs = end - start;
+  const slotMs = rangeMs <= 7*86400000 ? 900000 : rangeMs <= 30*86400000 ? 3600000 : 21600000;
+
+  // For coarser slots, aggregate from 15-min windows
+  const aggregated = {};
+  allWindows.forEach(w => {
     const d = new Date(w.ts);
-    return d.toLocaleDateString('en-US', {month:'short',day:'numeric'}) + ' ' + d.toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit',hour12:false});
+    const slotKey = Math.floor(d.getTime() / slotMs) * slotMs;
+    if (!aggregated[slotKey]) aggregated[slotKey] = { tokens: 0, pctMax: 0 };
+    aggregated[slotKey].tokens += w.tokens;
+    aggregated[slotKey].pctMax = Math.max(aggregated[slotKey].pctMax, w.pct);
   });
-  const pcts = intensity.windows.map(w => w.pct);
-  const tokens = intensity.windows.map(w => w.tokens);
+
+  // Generate full timeline from start to end
+  const labels = [], pcts = [], tokens = [];
+  const slotStart = Math.ceil(start.getTime() / slotMs) * slotMs;
+  for (let t = slotStart; t <= end.getTime(); t += slotMs) {
+    const d = new Date(t);
+    const fmtLabel = slotMs < 3600000
+      ? d.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' ' + d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false})
+      : slotMs < 86400000
+        ? d.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' ' + d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false})
+        : d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+    labels.push(fmtLabel);
+    const entry = aggregated[t];
+    pcts.push(entry ? entry.pctMax : 0);
+    tokens.push(entry ? entry.tokens : 0);
+  }
 
   const ctx = document.getElementById('intensityChart').getContext('2d');
-  new Chart(ctx, {
+  if (intensityChart) { intensityChart.destroy(); }
+  intensityChart = new Chart(ctx, {
     type: 'line',
     data: {
       labels,
       datasets: [{
         label: 'Usage %',
         data: pcts,
-        borderColor: pcts.map(p => p >= 85 ? '#f85149' : p >= 60 ? '#d29922' : '#58a6ff'),
+        borderColor: pcts.map(p => p >= 100 ? '#f85149' : p >= 75 ? '#d29922' : '#58a6ff'),
         backgroundColor: (context) => {
           const chart = context.chart;
           const {ctx: c, chartArea} = chart;
           if (!chartArea) return 'rgba(88,166,255,0.1)';
           const g = c.createLinearGradient(0, chartArea.bottom, 0, chartArea.top);
           g.addColorStop(0, 'rgba(88,166,255,0.02)');
-          g.addColorStop(0.6, 'rgba(88,166,255,0.08)');
-          g.addColorStop(0.85, 'rgba(210,153,34,0.15)');
+          g.addColorStop(0.75, 'rgba(88,166,255,0.08)');
           g.addColorStop(1, 'rgba(248,81,73,0.2)');
           return g;
         },
@@ -1514,7 +1546,7 @@ function openPeakModal(d) {
         segment: {
           borderColor: (ctx2) => {
             const v = pcts[ctx2.p1DataIndex];
-            return v >= 85 ? '#f85149' : v >= 60 ? '#d29922' : '#58a6ff';
+            return v >= 100 ? '#f85149' : v >= 75 ? '#d29922' : '#58a6ff';
           }
         }
       }]
@@ -1528,8 +1560,7 @@ function openPeakModal(d) {
           callbacks: {
             label: (ctx2) => {
               const i = ctx2.dataIndex;
-              const t = tokens[i];
-              return `${pcts[i]}% of cap (${fmt_tokens(t)})`;
+              return `${pcts[i]}% of cap (${fmt_tokens(tokens[i])})`;
             }
           }
         }
@@ -1541,6 +1572,7 @@ function openPeakModal(d) {
         },
         y: {
           min: 0,
+          suggestedMax: 110,
           ticks: { color: '#8b949e', font: { size: 10 }, callback: v => v + '%' },
           grid: { color: 'rgba(48,54,61,0.5)' }
         }
@@ -1550,23 +1582,34 @@ function openPeakModal(d) {
       id: 'thresholdLine',
       afterDraw(chart) {
         const yAxis = chart.scales.y;
-        const y85 = yAxis.getPixelForValue(85);
+        const y100 = yAxis.getPixelForValue(100);
+        if (y100 === undefined || y100 < chart.chartArea.top) return;
         const ctx3 = chart.ctx;
         ctx3.save();
         ctx3.strokeStyle = '#f85149';
         ctx3.lineWidth = 1;
         ctx3.setLineDash([6, 4]);
         ctx3.beginPath();
-        ctx3.moveTo(chart.chartArea.left, y85);
-        ctx3.lineTo(chart.chartArea.right, y85);
+        ctx3.moveTo(chart.chartArea.left, y100);
+        ctx3.lineTo(chart.chartArea.right, y100);
         ctx3.stroke();
         ctx3.fillStyle = '#f85149';
         ctx3.font = '10px sans-serif';
-        ctx3.fillText('85% threshold', chart.chartArea.right - 80, y85 - 4);
+        ctx3.fillText('100% cap', chart.chartArea.right - 62, y100 - 4);
         ctx3.restore();
       }
     }]
   });
+}
+
+(function() {
+  const intensity = DATA.intensity;
+  if (!intensity || !intensity.windows || intensity.windows.length === 0) return;
+
+  document.getElementById('intensity-section').style.display = '';
+
+  // Sync initial render with whatever view is active in the token usage chart
+  renderIntensityChart(getViewConfig(currentView).cutoff, null);
 
   // Heatmap
   const hm = intensity.heatmap;
@@ -1591,18 +1634,29 @@ function openPeakModal(d) {
     html += '</tr>';
   }
   html += '</tbody></table>';
-  html += `<div style="display:flex;align-items:center;gap:6px;margin-top:10px;font-size:10px;color:var(--muted)">
-    <span>Low</span>
-    <div style="display:flex;gap:2px">
+  html += `<div style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:10px;color:var(--muted);flex-wrap:wrap">
+    <span style="opacity:0.7">Token volume:</span>
+    <div style="display:flex;align-items:center;gap:3px">
       <div style="width:14px;height:14px;border-radius:3px;background:rgba(88,166,255,0.25)"></div>
-      <div style="width:14px;height:14px;border-radius:3px;background:rgba(88,166,255,0.55)"></div>
-      <div style="width:14px;height:14px;border-radius:3px;background:rgba(210,153,34,0.45)"></div>
-      <div style="width:14px;height:14px;border-radius:3px;background:rgba(210,153,34,0.75)"></div>
-      <div style="width:14px;height:14px;border-radius:3px;background:rgba(248,81,73,0.55)"></div>
-      <div style="width:14px;height:14px;border-radius:3px;background:rgba(248,81,73,0.95)"></div>
+      <span>&lt;30%</span>
     </div>
-    <span>High</span>
-    <span style="margin-left:10px;opacity:0.6">— hover cells for exact token count</span>
+    <div style="display:flex;align-items:center;gap:3px">
+      <div style="width:14px;height:14px;border-radius:3px;background:rgba(88,166,255,0.55)"></div>
+      <span>30–60%</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:3px">
+      <div style="width:14px;height:14px;border-radius:3px;background:rgba(210,153,34,0.45)"></div>
+      <span>60–85%</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:3px">
+      <div style="width:14px;height:14px;border-radius:3px;background:rgba(210,153,34,0.85)"></div>
+      <span>85–100%</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:3px">
+      <div style="width:14px;height:14px;border-radius:3px;background:rgba(248,81,73,0.95)"></div>
+      <span>&gt;100%</span>
+    </div>
+    <span style="margin-left:6px;opacity:0.5">— of peak hour · hover for token count</span>
   </div>`;
   document.getElementById('heatmap-container').innerHTML = html;
 
