@@ -1591,6 +1591,19 @@ function openPeakModal(d) {
     html += '</tr>';
   }
   html += '</tbody></table>';
+  html += `<div style="display:flex;align-items:center;gap:6px;margin-top:10px;font-size:10px;color:var(--muted)">
+    <span>Low</span>
+    <div style="display:flex;gap:2px">
+      <div style="width:14px;height:14px;border-radius:3px;background:rgba(88,166,255,0.25)"></div>
+      <div style="width:14px;height:14px;border-radius:3px;background:rgba(88,166,255,0.55)"></div>
+      <div style="width:14px;height:14px;border-radius:3px;background:rgba(210,153,34,0.45)"></div>
+      <div style="width:14px;height:14px;border-radius:3px;background:rgba(210,153,34,0.75)"></div>
+      <div style="width:14px;height:14px;border-radius:3px;background:rgba(248,81,73,0.55)"></div>
+      <div style="width:14px;height:14px;border-radius:3px;background:rgba(248,81,73,0.95)"></div>
+    </div>
+    <span>High</span>
+    <span style="margin-left:10px;opacity:0.6">— hover cells for exact token count</span>
+  </div>`;
   document.getElementById('heatmap-container').innerHTML = html;
 
   // Peak windows — rendered as event-cards with modals (matching spike/compact format)
