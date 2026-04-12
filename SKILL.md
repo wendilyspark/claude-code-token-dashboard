@@ -28,6 +28,10 @@ open http://localhost:8765
 4. Tell the user:
 > Dashboard is live at http://localhost:8765 — Cmd+R refreshes data in real time. The server runs in the background until you restart your machine or kill it manually.
 
+## Important: Never Generate Static Files
+
+Always work with the live server at `http://localhost:8765`. **Never use `--output`** to generate a static `dashboard.html` — the server regenerates HTML on every Cmd+R automatically. When debugging or verifying changes, reload `http://localhost:8765` in the browser (or use the preview server pointed at that URL), not a static file.
+
 ## Options
 
 - `--days N` — Load N days of data (default: 7)

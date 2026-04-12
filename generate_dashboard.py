@@ -252,7 +252,7 @@ def parse_projects(days: int):
                         s["end_time"] = ts.isoformat()
 
                     # Hourly aggregation
-                    hour_key = ts.strftime("%Y-%m-%dT%H:00")
+                    hour_key = ts.strftime("%Y-%m-%dT%H:00Z")  # always UTC with Z — unambiguous
                     hourly[hour_key]["tokens"] += total_tokens
                     hourly[hour_key]["cost"] += cost
                     hourly[hour_key]["models"][model] += total_tokens
@@ -296,9 +296,34 @@ PLAN_CAPS = {
     "max20x": 440_000_000,    # ~440M tokens per 5h window (10× Pro estimate)
 }
 
+WINDOW_ANCHOR_HOUR = 22  # 10pm local time — aligns with observed Claude Max plan window boundaries
+
+
+def _window_anchor_utc(anchor_hour: int = WINDOW_ANCHOR_HOUR) -> datetime:
+    """Return the single global reference point: most recent past anchor_hour:00 local time.
+    All 5h windows are ±N×5h from this point — never re-anchored per-timestamp."""
+    local_tz = datetime.now().astimezone().tzinfo
+    now_local = datetime.now(local_tz)
+    ref = now_local.replace(hour=anchor_hour, minute=0, second=0, microsecond=0)
+    if ref > now_local:
+        ref -= timedelta(days=1)  # anchor hasn't happened yet today — use yesterday's
+    return ref.astimezone(timezone.utc)
+
+
+# Compute once at build time so all window calculations share the same reference
+_ANCHOR_UTC = _window_anchor_utc()
+
+
+def get_fixed_window_start(t_utc: datetime, anchor_hour: int = WINDOW_ANCHOR_HOUR) -> datetime:
+    """Return start of the fixed 5h window containing t_utc, using the global anchor."""
+    window_secs = 5 * 3600
+    delta = (t_utc - _ANCHOR_UTC).total_seconds()
+    k = int(delta // window_secs)
+    return _ANCHOR_UTC + timedelta(seconds=k * window_secs)
+
 
 def compute_intensity(sessions: dict, cap: int):
-    """Compute rolling 5-hour token usage windows and usage intensity."""
+    """Compute fixed 5-hour token usage windows and usage intensity."""
     # Collect all messages across all sessions with timestamps
     all_msgs = []
     for sid, s in sessions.items():
@@ -349,12 +374,12 @@ def compute_intensity(sessions: dict, cap: int):
     windows = []
     current = min_time
     while current <= max_time:
-        # Sum tokens in [current - 5h, current]
-        window_start = current - window_dur
+        # Sum tokens in [window_start, current] using fixed anchor-aligned windows
+        window_start = get_fixed_window_start(current)
         total = 0
         active_sessions = set()
         for sk, tk in slot_tokens.items():
-            if window_start < sk <= current:
+            if window_start <= sk <= current:
                 total += tk
                 active_sessions.update(slot_sessions[sk])
         pct = round(total / cap * 100, 1) if cap > 0 else 0
@@ -372,7 +397,7 @@ def compute_intensity(sessions: dict, cap: int):
         if w["pct"] >= 85:
             # Find active sessions in this 5h window
             window_end = parse_ts(w["ts"])
-            window_start = window_end - window_dur
+            window_start = get_fixed_window_start(window_end)
             session_info = {}
             for sk, details in slot_details.items():
                 if window_start < sk <= window_end:
@@ -406,6 +431,8 @@ def compute_intensity(sessions: dict, cap: int):
         "peaks": deduped_peaks,
         "heatmap": heatmap,
         "cap": cap,
+        "window_anchor_hour": WINDOW_ANCHOR_HOUR,
+        "window_anchor_ts": _ANCHOR_UTC.isoformat(),  # absolute UTC reference, used by JS
     }
 
 
@@ -769,9 +796,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
   <!-- Usage Intensity -->
   <div id="intensity-section" class="intensity-section" style="display:none">
-    <div class="section-title">Usage Intensity <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;font-size:11px">— rolling 5h window vs estimated plan cap</span></div>
+    <div class="section-title">Usage Intensity <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;font-size:11px">— fixed 5h windows · cumulative budget consumed per window</span></div>
     <div class="chart-card">
-      <h3>Rolling 5-Hour Token Usage</h3>
+      <h3>5-Hour Window Budget Usage <span style="font-weight:400;font-size:11px;color:var(--muted)">— cumulative % of token budget consumed since each window start · dashed lines mark resets</span></h3>
       <canvas id="intensityChart"></canvas>
     </div>
     <div class="chart-card" style="margin-top:12px">
@@ -782,6 +809,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           <span style="color:var(--muted);font-size:11px">→</span>
           <input type="date" id="hm-to" class="date-input" title="To">
           <button class="view-btn" id="hm-apply">Apply</button>
+          <button class="view-btn" id="hm-current">Current</button>
         </div>
       </div>
       <div id="heatmap-container"></div>
@@ -889,8 +917,8 @@ function model_color(m) { return MODEL_COLORS[m] || '#abb2bf'; }
 function short_model(m) { return m.replace('claude-','').replace('-20251001',''); }
 
 function fmt_hour(hourStr) {
-  // hourStr is "2026-04-03T14:00" in UTC — convert to local
-  const d = new Date(hourStr + ':00Z');
+  // hourStr is UTC ISO with Z suffix — browser converts to local automatically
+  const d = new Date(hourStr);
   if (isNaN(d)) return hourStr.replace('T',' ');
   const yr = d.getFullYear();
   const mo = String(d.getMonth()+1).padStart(2,'0');
@@ -935,7 +963,7 @@ kpi_defs.forEach(d => {
 const allHours = DATA.hourly_series; // full dataset from Python
 
 // Parse each bucket's UTC timestamp into a local Date once
-const allHourDates = allHours.map(h => new Date(h.hour + ':00Z'));
+const allHourDates = allHours.map(h => new Date(h.hour));
 
 // Aggregate hourly buckets into a coarser granularity
 function aggregateBuckets(filtered, granularity) {
@@ -972,10 +1000,10 @@ function fillGaps(buckets, granularity, startDate, endDate) {
   const cur = new Date(startDate);
 
   if (granularity === 'hour') {
-    // Keys must match the UTC strings produced by Python (e.g. "2026-04-04T10:00")
+    // Keys must match the UTC strings produced by Python (e.g. "2026-04-04T10:00Z")
     cur.setUTCMinutes(0, 0, 0);
     while (cur <= endDate) {
-      const key = `${cur.getUTCFullYear()}-${String(cur.getUTCMonth()+1).padStart(2,'0')}-${String(cur.getUTCDate()).padStart(2,'0')}T${String(cur.getUTCHours()).padStart(2,'0')}:00`;
+      const key = `${cur.getUTCFullYear()}-${String(cur.getUTCMonth()+1).padStart(2,'0')}-${String(cur.getUTCDate()).padStart(2,'0')}T${String(cur.getUTCHours()).padStart(2,'0')}:00Z`;
       full.push(map.get(key) || {key, tokens:0, cost:0, spikes:0, models:{}});
       cur.setUTCHours(cur.getUTCHours() + 1);
     }
@@ -1002,7 +1030,7 @@ function fillGaps(buckets, granularity, startDate, endDate) {
 
 function bucketLabel(key, granularity) {
   if (granularity === 'hour') {
-    const d = new Date(key + ':00Z');
+    const d = new Date(key);
     const mo = String(d.getMonth()+1).padStart(2,'0');
     const dy = String(d.getDate()).padStart(2,'0');
     const hh = String(d.getHours()).padStart(2,'0');
@@ -1063,22 +1091,13 @@ function renderChart(view, fromDate, toDate) {
       borderColor: buckets.map(b => b.spikes ? '#f85149' : '#58a6ff'),
       borderWidth: 1,
       yAxisID: 'y',
-    }, {
-      type: 'line',
-      label: 'Cost ($)',
-      data: buckets.map(b => b.cost),
-      borderColor: '#ffa657',
-      backgroundColor: 'transparent',
-      yAxisID: 'y2',
-      tension: 0.3,
-      pointRadius: (granularity === 'week' || granularity === 'month') ? 4 : 2,
     }]
   };
 
   const opts = {
     responsive: true, maintainAspectRatio: true,
     plugins: {
-      legend: { labels: { color:'#8b949e', font:{size:11} } },
+      legend: { display: false },
       tooltip: { callbacks: { afterBody: items => {
         const b = buckets[items[0]?.dataIndex];
         if (!b) return [];
@@ -1089,9 +1108,8 @@ function renderChart(view, fromDate, toDate) {
       }}}
     },
     scales: {
-      x: { ticks: { color:'#8b949e', font:{size:9}, maxRotation:45, maxTicksLimit: maxTicks, autoSkip: true }, grid:{color:'#21262d'} },
-      y: { ticks: { color:'#8b949e', font:{size:10}, callback: v => { const r = Math.round(v); return r >= 1e6 ? Math.round(r/1e6)+'M' : r >= 1e3 ? Math.round(r/1e3)+'K' : r; } }, grid:{color:'#21262d'} },
-      y2: { position:'right', ticks:{color:'#ffa657',font:{size:10},callback:v=>'$'+Math.round(v)}, grid:{drawOnChartArea:false} }
+      x: { offset: false, ticks: { color:'#8b949e', font:{size:9}, maxRotation:45, maxTicksLimit: maxTicks, autoSkip: true }, grid:{color:'#21262d'} },
+      y: { ticks: { color:'#8b949e', font:{size:10}, callback: v => { const r = Math.round(v); return r >= 1e6 ? Math.round(r/1e6)+'M' : r >= 1e3 ? Math.round(r/1e3)+'K' : r; } }, grid:{ drawOnChartArea: false } }
     }
   };
 
@@ -1100,7 +1118,6 @@ function renderChart(view, fromDate, toDate) {
     afterDraw(chart) {
       const ctx = chart.ctx;
       const yL = chart.scales.y;
-      const yR = chart.scales.y2;
       ctx.save();
       ctx.font = '10px sans-serif';
       ctx.textBaseline = 'bottom';
@@ -1109,11 +1126,6 @@ function renderChart(view, fromDate, toDate) {
         ctx.textAlign = 'left';
         ctx.fillText('Tokens', yL.left, yL.top - 10);
       }
-      if (yR) {
-        ctx.fillStyle = '#ffa657';
-        ctx.textAlign = 'right';
-        ctx.fillText('Cost ($)', yR.right, yR.top - 10);
-      }
       ctx.restore();
     }
   };
@@ -1121,10 +1133,13 @@ function renderChart(view, fromDate, toDate) {
   const tsCtx = document.getElementById('tsChart').getContext('2d');
   if (tsChart) { tsChart.destroy(); }
   tsChart = new Chart(tsCtx, { type:'bar', data: chartData, options: opts, plugins: [axisLabelPlugin] });
+
+  // Return metadata so the intensity chart can share identical labels
+  return { labels, bucketMs: buckets.map(b => new Date(b.key).getTime()), maxTicks, granularity };
 }
 
-// Init default 3D view
-renderChart('3d');
+// Init default 3D view — store meta so the intensity IIFE (which runs after showing the section) can reuse it
+let lastChartMeta = renderChart('3d');
 
 // View button handlers
 document.querySelectorAll('.view-btn[data-view]').forEach(btn => {
@@ -1134,9 +1149,8 @@ document.querySelectorAll('.view-btn[data-view]').forEach(btn => {
     currentView = btn.dataset.view;
     document.getElementById('date-from').value = '';
     document.getElementById('date-to').value = '';
-    const { cutoff } = getViewConfig(btn.dataset.view);
-    renderChart(currentView);
-    renderIntensityChart(cutoff, null);
+    lastChartMeta = renderChart(currentView);
+    renderIntensityChart(lastChartMeta);
   });
 });
 
@@ -1144,12 +1158,12 @@ document.querySelectorAll('.view-btn[data-view]').forEach(btn => {
 document.getElementById('date-apply').addEventListener('click', () => {
   const from = document.getElementById('date-from').value;
   const to = document.getElementById('date-to').value;
-  if (!from && !to) { renderChart(currentView); const {cutoff} = getViewConfig(currentView); renderIntensityChart(cutoff, null); return; }
+  if (!from && !to) { lastChartMeta = renderChart(currentView); renderIntensityChart(lastChartMeta); return; }
   document.querySelectorAll('.view-btn[data-view]').forEach(b => b.classList.remove('active'));
   const fromDate = from ? new Date(from + 'T00:00:00') : null;
   const toDate = to ? new Date(to + 'T23:59:59') : new Date();
-  renderChart('custom', fromDate, toDate);
-  renderIntensityChart(fromDate, toDate);
+  lastChartMeta = renderChart('custom', fromDate, toDate);
+  renderIntensityChart(lastChartMeta);
 });
 
 // ── Model Chart ─────────────────────────────────────────────────────
@@ -1565,49 +1579,66 @@ function openPeakModal(d) {
 }
 
 let intensityChart = null;
+// Single global anchor from Python — the most recent past 22:00 local time, as UTC ISO string
+const INTENSITY_ANCHOR_MS = DATA.intensity ? new Date(DATA.intensity.window_anchor_ts).getTime() : Date.now();
+const INTENSITY_WINDOW_MS = 5 * 3600 * 1000;
 
-function renderIntensityChart(fromDate, toDate) {
+// Returns ms of each window boundary (reset point) within [startMs, endMs]
+// All windows computed relative to the single global anchor — consistent across all dates
+function getWindowBoundaries(startMs, endMs) {
+  const diff = startMs - INTENSITY_ANCHOR_MS;
+  const k = Math.floor(diff / INTENSITY_WINDOW_MS);
+  let t = INTENSITY_ANCHOR_MS + k * INTENSITY_WINDOW_MS;
+  if (t <= startMs) t += INTENSITY_WINDOW_MS;
+  const out = [];
+  while (t < endMs) { out.push(t); t += INTENSITY_WINDOW_MS; }
+  return out;
+}
+
+// Returns the start ms of the fixed window that contains tMs
+function getWindowStartMs(tMs) {
+  const delta = tMs - INTENSITY_ANCHOR_MS;
+  const k = Math.floor(delta / INTENSITY_WINDOW_MS);
+  return INTENSITY_ANCHOR_MS + k * INTENSITY_WINDOW_MS;
+}
+
+function fmtLocalTime(ms) {
+  const d = new Date(ms);
+  return d.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', hour12:false});
+}
+function fmtLocalDateTime(ms) {
+  const d = new Date(ms);
+  return d.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' ' + fmtLocalTime(ms);
+}
+
+// chartMeta is the object returned by renderChart — shares exact labels/times with the token chart
+function renderIntensityChart(chartMeta) {
   const intensity = DATA.intensity;
   if (!intensity) return;
 
-  const allWindows = intensity.windows || [];
-  const now = new Date();
-  const end = toDate || now;
-  const start = fromDate || (allWindows.length > 0 ? new Date(allWindows[0].ts) : new Date(now - 7*86400000));
+  const { labels, bucketMs, maxTicks } = chartMeta;
 
-  // Build a lookup: ISO ts (rounded to 15min) -> window data
-  const windowMap = {};
-  allWindows.forEach(w => { windowMap[w.ts] = w; });
-
-  // Decide slot size: ≤7d → 15min, ≤30d → 1h, else → 6h
-  const rangeMs = end - start;
-  const slotMs = rangeMs <= 7*86400000 ? 900000 : rangeMs <= 30*86400000 ? 3600000 : 21600000;
-
-  // For coarser slots, aggregate from 15-min windows
+  // Aggregate 15-min intensity windows into hourly slots (keyed by hour-aligned ms)
   const aggregated = {};
-  allWindows.forEach(w => {
-    const d = new Date(w.ts);
-    const slotKey = Math.floor(d.getTime() / slotMs) * slotMs;
-    if (!aggregated[slotKey]) aggregated[slotKey] = { tokens: 0, pctMax: 0 };
-    aggregated[slotKey].tokens += w.tokens;
-    aggregated[slotKey].pctMax = Math.max(aggregated[slotKey].pctMax, w.pct);
+  (intensity.windows || []).forEach(w => {
+    const t = Math.floor(new Date(w.ts).getTime() / 3600000) * 3600000;
+    if (!aggregated[t]) aggregated[t] = { tokens: 0, pctMax: 0 };
+    aggregated[t].tokens += w.tokens;
+    aggregated[t].pctMax = Math.max(aggregated[t].pctMax, w.pct);
   });
 
-  // Generate full timeline from start to end
-  const labels = [], pcts = [], tokens = [];
-  const slotStart = Math.ceil(start.getTime() / slotMs) * slotMs;
-  for (let t = slotStart; t <= end.getTime(); t += slotMs) {
-    const d = new Date(t);
-    const fmtLabel = slotMs < 3600000
-      ? d.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' ' + d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false})
-      : slotMs < 86400000
-        ? d.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' ' + d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false})
-        : d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
-    labels.push(fmtLabel);
+  // Use the exact same time points as the token chart — guarantees identical tick positions
+  const pcts = [], tokens = [], slotTimes = [];
+  bucketMs.forEach(t => {
     const entry = aggregated[t];
     pcts.push(entry ? entry.pctMax : 0);
     tokens.push(entry ? entry.tokens : 0);
-  }
+    slotTimes.push(t);
+  });
+
+  const start = bucketMs[0] || Date.now();
+  const end = bucketMs[bucketMs.length - 1] || Date.now();
+  const boundaries = getWindowBoundaries(start, end + 3600000);
 
   const ctx = document.getElementById('intensityChart').getContext('2d');
   if (intensityChart) { intensityChart.destroy(); }
@@ -1616,7 +1647,7 @@ function renderIntensityChart(fromDate, toDate) {
     data: {
       labels,
       datasets: [{
-        label: 'Usage %',
+        label: 'Budget used %',
         data: pcts,
         borderColor: pcts.map(p => p >= 100 ? '#f85149' : p >= 75 ? '#d29922' : '#58a6ff'),
         backgroundColor: (context) => {
@@ -1644,50 +1675,93 @@ function renderIntensityChart(fromDate, toDate) {
     },
     options: {
       responsive: true,
+      _rangeStart: start,
+      _rangeEnd: end,
       plugins: {
         legend: { display: false },
-        annotation: undefined,
         tooltip: {
           callbacks: {
+            title: (items) => {
+              const i = items[0].dataIndex;
+              const tMs = slotTimes[i];
+              return fmtLocalDateTime(tMs);
+            },
             label: (ctx2) => {
               const i = ctx2.dataIndex;
-              return `${pcts[i]}% of cap (${fmt_tokens(tokens[i])})`;
+              return `  ${pcts[i]}% of 5h budget used  (${fmt_tokens(tokens[i])} tokens)`;
+            },
+            afterLabel: (ctx2) => {
+              const i = ctx2.dataIndex;
+              const tMs = slotTimes[i];
+              const winEnd = getWindowStartMs(tMs) + INTENSITY_WINDOW_MS;
+              const remaining = winEnd - tMs;
+              if (remaining <= 0) return '  window ended';
+              const hh = Math.floor(remaining / 3600000);
+              const mm = Math.floor((remaining % 3600000) / 60000);
+              return `  ↺ resets in ${hh}h ${mm}m  (at ${fmtLocalTime(winEnd)})`;
             }
           }
         }
       },
       scales: {
         x: {
-          ticks: { color: '#8b949e', font: { size: 9 }, maxTicksLimit: 12, maxRotation: 45 },
+          ticks: { color: '#8b949e', font: { size: 9 }, maxTicksLimit: maxTicks, maxRotation: 45, autoSkip: true },
           grid: { color: 'rgba(48,54,61,0.5)' }
         },
         y: {
           min: 0,
           suggestedMax: 110,
+          title: { display: false },
           ticks: { color: '#8b949e', font: { size: 10 }, callback: v => v + '%' },
-          grid: { color: 'rgba(48,54,61,0.5)' }
+          grid: { drawOnChartArea: false }
         }
       }
     },
     plugins: [{
-      id: 'thresholdLine',
+      id: 'windowLines',
       afterDraw(chart) {
+        const { ctx: c, chartArea } = chart;
+        const rangeStart = chart.options._rangeStart;
+        const rangeEnd = chart.options._rangeEnd;
+        if (!rangeStart || !rangeEnd || rangeEnd <= rangeStart) return;
+        c.save();
+        boundaries.forEach(bMs => {
+          const xFrac = (bMs - rangeStart) / (rangeEnd - rangeStart);
+          const x = chartArea.left + xFrac * (chartArea.right - chartArea.left);
+          if (x < chartArea.left || x > chartArea.right) return;
+          // Vertical dashed line
+          c.strokeStyle = 'rgba(188,140,255,0.55)';
+          c.lineWidth = 1;
+          c.setLineDash([4, 3]);
+          c.beginPath();
+          c.moveTo(x, chartArea.top);
+          c.lineTo(x, chartArea.bottom);
+          c.stroke();
+          // Reset label at top
+          c.setLineDash([]);
+          c.fillStyle = 'rgba(188,140,255,0.85)';
+          c.font = 'bold 9px sans-serif';
+          c.textAlign = 'center';
+          c.fillText('↺ ' + fmtLocalTime(bMs), x, chartArea.top + 10);
+        });
+        // 100% cap line
         const yAxis = chart.scales.y;
         const y100 = yAxis.getPixelForValue(100);
-        if (y100 === undefined || y100 < chart.chartArea.top) return;
-        const ctx3 = chart.ctx;
-        ctx3.save();
-        ctx3.strokeStyle = '#f85149';
-        ctx3.lineWidth = 1;
-        ctx3.setLineDash([6, 4]);
-        ctx3.beginPath();
-        ctx3.moveTo(chart.chartArea.left, y100);
-        ctx3.lineTo(chart.chartArea.right, y100);
-        ctx3.stroke();
-        ctx3.fillStyle = '#f85149';
-        ctx3.font = '10px sans-serif';
-        ctx3.fillText('100% cap', chart.chartArea.right - 62, y100 - 4);
-        ctx3.restore();
+        if (y100 !== undefined && y100 >= chartArea.top) {
+          c.strokeStyle = '#f85149';
+          c.lineWidth = 1;
+          c.setLineDash([6, 4]);
+          c.beginPath();
+          c.moveTo(chartArea.left, y100);
+          c.lineTo(chartArea.right, y100);
+          c.stroke();
+          c.setLineDash([]);
+          c.fillStyle = '#f85149';
+          c.font = '10px sans-serif';
+          c.textAlign = 'right';
+          c.fillText('100% cap', chartArea.right - 4, y100 - 4);
+        }
+        c.restore();
       }
     }]
   });
@@ -1700,7 +1774,7 @@ function renderIntensityChart(fromDate, toDate) {
   document.getElementById('intensity-section').style.display = '';
 
   // Sync initial render with whatever view is active in the token usage chart
-  renderIntensityChart(getViewConfig(currentView).cutoff, null);
+  renderIntensityChart(lastChartMeta);
 
   // Heatmap — rendered client-side from hourly_series, colored by % of hourly plan cap
   const hmCap = intensity.cap || 0;
@@ -1711,7 +1785,7 @@ function renderIntensityChart(fromDate, toDate) {
     const grid = Array.from({length: 7}, () => new Array(24).fill(0));
     const counts = Array.from({length: 7}, () => new Array(24).fill(0));
     DATA.hourly_series.forEach(h => {
-      const d = new Date(h.hour);
+      const d = new Date(h.hour);  // h.hour has Z suffix — browser converts to local automatically
       if (fromDate && d < fromDate) return;
       if (toDate && d > toDate) return;
       const dow = (d.getDay() + 6) % 7;
@@ -1730,7 +1804,7 @@ function renderIntensityChart(fromDate, toDate) {
     const grid = Array.from({length: 7}, () => new Array(24).fill(0));
     const counts = Array.from({length: 7}, () => new Array(24).fill(0));
     DATA.hourly_series.forEach(h => {
-      const d = new Date(h.hour);
+      const d = new Date(h.hour);  // h.hour has Z suffix — browser converts to local automatically
       if (cutoffMs && d.getTime() < cutoffMs) return;
       const dow = (d.getDay() + 6) % 7;
       const hr = d.getHours();
@@ -1786,6 +1860,13 @@ function renderIntensityChart(fromDate, toDate) {
     const fromDate = from ? new Date(from + 'T00:00:00') : null;
     const toDate = to ? new Date(to + 'T23:59:59') : null;
     renderHeatmapRange(fromDate, toDate);
+  });
+
+  document.getElementById('hm-current').addEventListener('click', () => {
+    const hmDefaultFrom = new Date(Date.now() - 7*86400000);
+    document.getElementById('hm-from').value = hmDefaultFrom.toLocaleDateString('en-CA');  // YYYY-MM-DD in local tz
+    document.getElementById('hm-to').value = '';
+    renderHeatmap(7);
   });
 
   // Peak windows — rendered as event-cards with modals (matching spike/compact format)
