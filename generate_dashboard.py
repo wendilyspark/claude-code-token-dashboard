@@ -689,22 +689,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
   /* Usage Intensity */
   .intensity-section { margin-top: 28px; }
-  .heatmap-wrap { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 16px; }
   .heatmap-table { border-collapse: collapse; font-size: 10px; }
   .heatmap-table th, .heatmap-table td { padding: 4px 6px; text-align: center; min-width: 28px; }
   .heatmap-table th { color: var(--muted); font-weight: 500; }
   .heatmap-cell { border-radius: 3px; cursor: default; }
-  .peak-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; margin-top: 12px; }
-  .peak-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
-  .peak-card.critical { border-color: var(--red); }
-  .peak-card .peak-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-  .peak-card .peak-pct { font-size: 20px; font-weight: 700; }
-  .peak-card .peak-pct.warn { color: var(--yellow); }
-  .peak-card .peak-pct.danger { color: var(--red); }
-  .peak-card .peak-time { color: var(--muted); font-size: 11px; }
-  .peak-card .peak-sessions { font-size: 11px; color: var(--muted); }
-  .peak-card .peak-sessions li { margin: 3px 0; }
-  .peak-card .peak-sessions .slug { color: var(--blue); font-weight: 500; }
+  .event-card.peak { border-left-color: var(--orange); }
+  .event-card.peak .ev-title { color: var(--orange); }
 
   /* View buttons & date picker */
   .view-btns { display:flex; gap:3px; }
@@ -784,15 +774,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <h3>Rolling 5-Hour Token Usage</h3>
       <canvas id="intensityChart"></canvas>
     </div>
-    <div class="heatmap-wrap">
-      <div class="chart-card" style="flex:1;min-width:300px">
-        <h3>Weekly Usage Heatmap <span style="color:var(--muted);font-weight:400;font-size:11px">— tokens by day &amp; hour</span></h3>
-        <div id="heatmap-container"></div>
-      </div>
-      <div class="chart-card" style="flex:1;min-width:300px">
-        <h3 id="peaks-title">Peak Windows</h3>
-        <div class="peak-cards" id="peak-cards"></div>
-      </div>
+    <div class="chart-card" style="margin-top:12px">
+      <h3>Weekly Usage Heatmap <span style="color:var(--muted);font-weight:400;font-size:11px">— tokens by day &amp; hour</span></h3>
+      <div id="heatmap-container"></div>
+    </div>
+    <div id="peak-events-section" style="margin-top:12px">
+      <div class="section-title" id="peaks-title">🔥 Peak Usage Windows <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;font-size:11px">— click any card for details</span></div>
+      <div class="event-grid" id="peak-cards"></div>
     </div>
   </div>
 
@@ -1456,6 +1444,33 @@ obsToggle.observe(toggleRowEl);
 obsInline.observe(document.getElementById('pagination-inline'));
 
 // ─── Usage Intensity ──────────────────────────────────────────────────────────
+function openPeakModal(d) {
+  const timeStr = fmt_time(d.ts);
+  const pctColor = d.pct >= 100 ? 'var(--red)' : 'var(--orange)';
+  let sessRows = '';
+  if (d.sessions && d.sessions.length) {
+    sessRows = d.sessions.map(s =>
+      `<div class="modal-row">
+        <div class="label"><span style="color:var(--blue)">${esc(s.slug)}</span></div>
+        <div>
+          ${fmt_tokens(s.tokens)} tokens &nbsp;·&nbsp; <span style="color:var(--muted)">${esc(short_model(s.model))}</span>
+          <div style="color:#c9d1d9;margin-top:4px;font-size:12px">${esc((s.task||'').slice(0,300))}</div>
+        </div>
+      </div>`
+    ).join('');
+  }
+  openModal(`
+    <h2>🔥 Peak Usage — ${timeStr}</h2>
+    ${modalRow('Usage level', `<span style="color:${pctColor};font-weight:700;font-size:18px">${d.pct}%</span> of estimated plan cap`)}
+    ${modalRow('Total tokens in 5h window', fmt_tokens(d.tokens))}
+    <div style="margin:14px 0 8px;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:0.05em">Active Sessions During This Window</div>
+    ${sessRows || '<div style="color:var(--muted);font-size:12px">No session details available</div>'}
+    <div class="modal-row" style="margin-top:14px;color:var(--muted);font-size:11px">
+      This is a rolling 5-hour window. Usage above 85% may trigger rate limiting on your subscription plan.
+    </div>
+  `);
+}
+
 (function() {
   const intensity = DATA.intensity;
   if (!intensity || !intensity.windows || intensity.windows.length === 0) return;
@@ -1578,35 +1593,27 @@ obsInline.observe(document.getElementById('pagination-inline'));
   html += '</tbody></table>';
   document.getElementById('heatmap-container').innerHTML = html;
 
-  // Peak windows
+  // Peak windows — rendered as event-cards with modals (matching spike/compact format)
   const peaks = intensity.peaks;
+  const peakGrid = document.getElementById('peak-cards');
+  const peakSection = document.getElementById('peak-events-section');
   if (peaks.length === 0) {
-    document.getElementById('peaks-title').textContent = 'Peak Windows — none above 85%';
-    document.getElementById('peak-cards').innerHTML = '<div style="color:var(--muted);font-size:12px;padding:12px">No 5-hour windows exceeded 85% of estimated plan cap.</div>';
+    peakSection.style.display = 'none';
   } else {
-    document.getElementById('peaks-title').textContent = `Peak Windows — ${peaks.length} above 85%`;
-    let peakHtml = '';
     peaks.forEach(p => {
       const d = new Date(p.ts);
       const timeStr = d.toLocaleDateString('en-US', {month:'short',day:'numeric'}) + ' ' + d.toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit',hour12:false});
-      const cls = p.pct >= 100 ? 'critical' : '';
-      const pctCls = p.pct >= 100 ? 'danger' : 'warn';
-      let sessHtml = '';
-      if (p.sessions && p.sessions.length) {
-        sessHtml = '<ul class="peak-sessions">' + p.sessions.map(s =>
-          `<li><span class="slug">${s.slug}</span> — ${fmt_tokens(s.tokens)} — ${s.task.substring(0,80)}</li>`
-        ).join('') + '</ul>';
-      }
-      peakHtml += `<div class="peak-card ${cls}">
-        <div class="peak-header">
-          <span class="peak-pct ${pctCls}">${p.pct}%</span>
-          <span class="peak-time">${timeStr}</span>
-        </div>
-        <div style="color:var(--muted);font-size:11px;margin-bottom:6px">${fmt_tokens(p.tokens)} in 5h window</div>
-        ${sessHtml}
+      const onclickData = JSON.stringify({
+        ts: p.ts, pct: p.pct, tokens: p.tokens,
+        sessions: (p.sessions||[]).map(s => ({slug:s.slug, tokens:s.tokens, model:s.model, task:s.task}))
+      }).replace(/'/g, "&#39;");
+      peakGrid.innerHTML += `<div class="event-card peak" onclick='openPeakModal(${onclickData})'>
+        <div class="ev-title">🔥 ${p.pct}% usage</div>
+        <div class="ev-time">${timeStr}</div>
+        <div class="ev-tokens"><span style="color:var(--muted);font-size:9px">tokens </span>${fmt_tokens(p.tokens)}</div>
+        <div class="ev-session">${(p.sessions||[]).map(s=>s.slug).join(', ')}</div>
       </div>`;
     });
-    document.getElementById('peak-cards').innerHTML = peakHtml;
   }
 })();
 </script>
