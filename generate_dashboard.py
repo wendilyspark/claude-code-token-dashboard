@@ -760,8 +760,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 <div class="header">
   <h1>⚡ Claude Code Token Dashboard</h1>
-  <div style="display:flex;align-items:center;gap:16px;">
+  <div style="display:flex;align-items:center;gap:12px;">
     <span class="meta" id="gen-time"></span>
+    <span id="plan-badge" style="font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px;background:var(--bg3);border:1px solid var(--border);color:var(--muted);letter-spacing:0.03em;"></span>
     <button class="refresh-btn" onclick="window.location.reload()">↻ Refresh</button>
   </div>
 </div>
@@ -943,6 +944,7 @@ function fmt_time(iso) {
 
 // ── KPIs ───────────────────────────────────────────────────────────
 document.getElementById('gen-time').textContent = 'Generated: ' + DATA.generated_at;
+if (DATA.plan_name) document.getElementById('plan-badge').textContent = DATA.plan_name;
 const k = DATA.kpis;
 const kpi_defs = [
   { label: 'Total Tokens', value: fmt_tokens(k.total_tokens), sub: k.total_requests + ' API requests', sub2: '≈ ' + fmt_kpi_cost(k.total_cost) + ' API equiv', cls: 'tokens' },
@@ -1948,9 +1950,16 @@ function renderIntensityChart(chartMeta) {
 
 # ─── Build ────────────────────────────────────────────────────────────────────
 
-def build_html(days: int, cap: int = 0) -> str:
+PLAN_DISPLAY = {
+    "pro":    "Pro",
+    "max5x":  "Max 5×",
+    "max20x": "Max 20×",
+}
+
+def build_html(days: int, cap: int = 0, plan: str = "max5x") -> str:
     sessions, hourly = parse_projects(days)
     data = aggregate(sessions, hourly, days, cap)
+    data["plan_name"] = PLAN_DISPLAY.get(plan, plan)
     return HTML_TEMPLATE.replace("__DATA__", json.dumps(data, ensure_ascii=False, separators=(',', ':')))
 
 
@@ -1973,7 +1982,7 @@ def main():
     # Static file mode (--output): write once and exit
     if args.output:
         print(f"Generating static dashboard for last {args.days} day(s)...")
-        html = build_html(args.days, cap)
+        html = build_html(args.days, cap, args.plan)
         Path(args.output).write_text(html, encoding="utf-8")
         print(f"✅ Written to: {args.output}")
         if args.open:
@@ -1989,7 +1998,7 @@ def main():
                 self.send_response(204)
                 self.end_headers()
                 return
-            html = build_html(days, cap)
+            html = build_html(days, cap, args.plan)
             body = html.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
