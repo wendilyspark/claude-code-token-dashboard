@@ -2,7 +2,11 @@
 
 A local Python script that reads Claude Code usage logs and generates a fully interactive cost + usage dashboard in your browser. No account needed. No data leaves your machine.
 
-![Dashboard Screenshot](docs/dashboard-preview.jpg)
+![Dashboard Overview](docs/dashboard-preview.jpg)
+
+## Why It Exists
+
+Claude Code's built-in `/cost` command tells you total spend after the fact — nothing more. There's no timeline, no session breakdown, no model split, and no way to see which tasks are burning the most tokens. This dashboard fills that gap.
 
 ## What It Shows
 
@@ -14,13 +18,26 @@ A local Python script that reads Claude Code usage logs and generates a fully in
 - **Sessions table** — every session sorted by cost, expandable to show the top 5 most expensive requests and what Claude was actually doing
 - **Terminology glossary** — definitions of session, request, cache savings, spike, and compaction
 
-## Why It Exists
+### Activity Heatmap
 
-Claude Code's built-in `/cost` command tells you total spend after the fact — nothing more. There's no timeline, no session breakdown, no model split, and no way to see which tasks are burning the most tokens. This dashboard fills that gap.
+![Activity Heatmap](docs/activity-heatmap.jpg)
+
+Token burn rate over time — dark peaks are spike events automatically flagged with a 2σ threshold.
+
+### Cost by Model & Task Breakdown
+
+<table>
+<tr>
+<td><img src="docs/cost-by-model.jpg" alt="Cost by Model"></td>
+<td><img src="docs/task-breakdown.jpg" alt="Task Breakdown"></td>
+</tr>
+</table>
+
+**Cost by Model** shows cumulative spend split across Opus, Sonnet, and Haiku so you can see where budget is actually going. **Task Breakdown** classifies sessions by type — coding, planning, debugging, research, canvas — surfacing which workflows consume the most tokens.
 
 ## Input
 
-The script reads `~/.claude/projects/**/*.jsonl` — the standard Claude Code usage logs that are written automatically as you work. No additional configuration needed.
+The script reads `~/.claude/projects/**/*.jsonl` — the standard Claude Code usage logs written automatically as you work. No additional configuration needed.
 
 **Key fields extracted:**
 - `type: "assistant"` → model, input/output/cache tokens, timestamp
@@ -37,7 +54,7 @@ The script reads `~/.claude/projects/**/*.jsonl` — the standard Claude Code us
 
 A self-contained `dashboard.html` file (~100KB) that opens automatically in your default browser. All data is embedded — no server required, the file works offline.
 
-**Sample output values (from a real session):**
+**Sample output values:**
 
 | Metric | Example |
 |--------|---------|
