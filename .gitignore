@@ -8,3 +8,4 @@ dashboard_*.html
 # Python
 __pycache__/
 *.pyc
+not_in_repo/
