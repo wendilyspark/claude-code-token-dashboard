@@ -9,3 +9,4 @@ dashboard_*.html
 __pycache__/
 *.pyc
 not_in_repo/
+config.json

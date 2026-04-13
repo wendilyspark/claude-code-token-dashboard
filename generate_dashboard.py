@@ -1958,6 +1958,59 @@ function renderIntensityChart(chartMeta) {
 """
 
 
+# ─── Config ───────────────────────────────────────────────────────────────────
+
+CONFIG_PATH = Path(__file__).parent / "config.json"
+
+PLAN_OPTIONS = {
+    "1": ("pro",    "Pro",     "$20/mo"),
+    "2": ("max5x",  "Max 5×",  "$100/mo"),
+    "3": ("max20x", "Max 20×", "$200/mo"),
+}
+
+def load_config() -> dict:
+    if CONFIG_PATH.exists():
+        try:
+            return json.loads(CONFIG_PATH.read_text())
+        except Exception:
+            pass
+    return {}
+
+def save_config(cfg: dict):
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+
+def run_setup():
+    """Interactive first-run plan selection."""
+    print("\n┌─────────────────────────────────────────────────┐")
+    print("│   Claude Code Token Dashboard — First-Time Setup  │")
+    print("└─────────────────────────────────────────────────┘\n")
+    print("Select your Claude subscription plan:\n")
+    for key, (_, display, price) in PLAN_OPTIONS.items():
+        print(f"  {key}.  {display:<10}  {price}")
+    print()
+
+    while True:
+        choice = input("Enter 1, 2, or 3: ").strip()
+        if choice in PLAN_OPTIONS:
+            break
+        print("  Please enter 1, 2, or 3.")
+
+    plan_id, plan_display, _ = PLAN_OPTIONS[choice]
+    save_config({"plan": plan_id})
+
+    print(f"\n✅  Plan saved: {plan_display}\n")
+    print("─" * 52)
+    print("ℹ️   Note: Claude Code does not expose your subscription")
+    print("    plan via any API, so this dashboard cannot detect it")
+    print("    automatically. The usage intensity chart is scaled")
+    print("    relative to your plan's 5-hour window budget.")
+    print()
+    print("    If you change plans, just tell Claude and it will")
+    print("    run setup again to update this setting.")
+    print("─" * 52 + "\n")
+    return plan_id
+
+
 # ─── Build ────────────────────────────────────────────────────────────────────
 
 PLAN_DISPLAY = {
@@ -1980,19 +2033,35 @@ def main():
     parser.add_argument("--days", type=int, default=7, help="Number of days back to load (default: 7)")
     parser.add_argument("--port", type=int, default=8765, help="Local server port (default: 8765)")
     parser.add_argument("--output", type=str, default=None, help="Write static HTML to file and exit (skips server)")
-    parser.add_argument("--plan", type=str, default="max5x", choices=["pro", "max5x", "max20x"],
-                        help="Subscription plan for usage intensity tracking (default: max5x)")
+    parser.add_argument("--plan", type=str, default=None, choices=["pro", "max5x", "max20x"],
+                        help="Subscription plan for usage intensity tracking (overrides saved config)")
     parser.add_argument("--cap", type=int, default=None, help="Custom token cap per 5h window (overrides --plan)")
+    parser.add_argument("--setup", action="store_true", help="Re-run plan selection setup")
     parser.add_argument("--open", action="store_true", default=True, help="Auto-open in browser (default: true)")
     parser.add_argument("--no-open", dest="open", action="store_false", help="Do not auto-open")
     args = parser.parse_args()
 
-    cap = args.cap if args.cap else PLAN_CAPS.get(args.plan, 0)
+    # ── Resolve plan ──────────────────────────────────────────────────────────
+    if args.setup:
+        run_setup()
+        return          # setup-only mode: save config and exit
+    elif args.plan:
+        # Explicit --plan flag overrides config (but doesn't save)
+        plan = args.plan
+    else:
+        cfg = load_config()
+        if "plan" not in cfg:
+            # First run — no config yet
+            plan = run_setup()
+        else:
+            plan = cfg["plan"]
+
+    cap = args.cap if args.cap else PLAN_CAPS.get(plan, 0)
 
     # Static file mode (--output): write once and exit
     if args.output:
         print(f"Generating static dashboard for last {args.days} day(s)...")
-        html = build_html(args.days, cap, args.plan)
+        html = build_html(args.days, cap, plan)
         Path(args.output).write_text(html, encoding="utf-8")
         print(f"✅ Written to: {args.output}")
         if args.open:

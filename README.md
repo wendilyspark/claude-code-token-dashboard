@@ -71,30 +71,39 @@ A self-contained `dashboard.html` file (~100KB) that opens automatically in your
 **Requirements:** Python 3.8+ · Standard library only (no pip installs)
 
 ```bash
-# Clone the repo
 git clone https://github.com/wendilyspark/claude-code-token-dashboard
-cd claude-code-token-dashboard
-
-# Run it
-python3 generate_dashboard.py
-```
-
-The dashboard opens automatically in your browser.
-
-### As a Claude Code Skill
-
-Place the script where Claude Code can find it, and Claude will run it automatically when you ask about token usage or costs:
-
-```bash
 mkdir -p ~/.claude/skills/token-dashboard
-cp generate_dashboard.py ~/.claude/skills/token-dashboard/
-cp SKILL.md ~/.claude/skills/token-dashboard/
+cp claude-code-token-dashboard/generate_dashboard.py ~/.claude/skills/token-dashboard/
+cp claude-code-token-dashboard/SKILL.md ~/.claude/skills/token-dashboard/
 ```
 
 Then just ask Claude:
 - *"Show me my token usage"*
 - *"How much have I spent on Claude Code this week?"*
 - *"Open my usage dashboard"*
+
+**First launch:** Claude will run an interactive setup that asks you to select your subscription plan. This takes about 10 seconds and only happens once.
+
+## Plan Setup & Usage Intensity
+
+The dashboard includes a **usage intensity chart** that tracks your rolling 5-hour token budget — the same window Anthropic uses to rate-limit Claude.ai subscriptions. Because Claude Code has no API to detect your current plan automatically, the script asks you to select it once during setup:
+
+```
+Select your Claude subscription plan:
+
+  1.  Pro        $20/mo
+  2.  Max 5×     $100/mo
+  3.  Max 20×    $200/mo
+```
+
+Your choice is saved to `~/.claude/skills/token-dashboard/config.json`. The intensity chart is scaled relative to your plan's 5-hour session budget (Anthropic publishes multipliers, not absolute token counts).
+
+> **Note:** Anthropic does not expose your subscription plan through any API or Claude Code interface. The dashboard cannot detect plan changes automatically. If you upgrade or downgrade, tell Claude — it will re-run setup to update the setting.
+
+**To re-run setup manually:**
+```bash
+python3 generate_dashboard.py --setup
+```
 
 ## Usage
 
@@ -105,11 +114,12 @@ python3 generate_dashboard.py
 # Custom time window
 python3 generate_dashboard.py --days 30
 
-# Generate without auto-opening browser
-python3 generate_dashboard.py --no-open
-```
+# Override plan for this run only (does not save)
+python3 generate_dashboard.py --plan pro
 
-The output file is saved as `dashboard.html` in the same directory as the script.
+# Re-run plan selection
+python3 generate_dashboard.py --setup
+```
 
 ## Pricing Configuration
 
