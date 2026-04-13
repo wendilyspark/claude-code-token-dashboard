@@ -774,8 +774,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);">Current Plan</span>
     <span id="plan-banner-name" style="font-size:15px;font-weight:700;color:var(--text);letter-spacing:0.01em;"></span>
     <span style="flex:1"></span>
-    <span style="font-size:11px;color:var(--muted);">Token cap per 5h window:</span>
-    <span id="plan-banner-cap" style="font-size:13px;font-weight:600;color:var(--blue);font-variant-numeric:tabular-nums;"></span>
   </div>
 
   <!-- KPI Cards -->
@@ -956,8 +954,6 @@ document.getElementById('gen-time').textContent = 'Generated: ' + DATA.generated
 if (DATA.plan_name) {
   document.getElementById('plan-badge').textContent = DATA.plan_name;
   document.getElementById('plan-banner-name').textContent = DATA.plan_name;
-  const cap = DATA.intensity && DATA.intensity.cap;
-  document.getElementById('plan-banner-cap').textContent = cap ? fmt_tokens(cap) + ' / 5h' : '—';
 }
 const k = DATA.kpis;
 const kpi_defs = [
