@@ -12,6 +12,7 @@ Claude Code's built-in `/cost` command tells you total spend after the fact — 
 
 - **Total cost, cache savings, token count, session count** — at a glance
 - **Token usage over time** — interactive bar chart with 1D / 3D / 7D / 30D / 1Y views and a custom date range picker
+- **Usage intensity** — rolling 5-hour window chart scaled to your plan's token budget
 - **Cost by model** — Opus, Sonnet, and Haiku usage side by side
 - **Task type breakdown** — coding, planning, debugging, research, and more
 - **Spike & compaction events** — anomalous hours (detected with 2σ threshold) and context compaction events, with per-event details
@@ -52,7 +53,7 @@ The script reads `~/.claude/projects/**/*.jsonl` — the standard Claude Code us
 
 ## Output
 
-A self-contained `dashboard.html` file (~100KB) that opens automatically in your default browser. All data is embedded — no server required, the file works offline.
+A self-contained HTML page served locally at `http://localhost:8765`. All data is embedded — Cmd+R regenerates from live logs on every refresh.
 
 **Sample output values:**
 
@@ -82,23 +83,32 @@ Then just ask Claude:
 - *"How much have I spent on Claude Code this week?"*
 - *"Open my usage dashboard"*
 
-**First launch:** Claude will run an interactive setup that asks you to select your subscription plan. This takes about 10 seconds and only happens once.
+**First launch:** Claude runs an interactive setup that asks you to select your subscription plan (see below). This takes about 10 seconds and only happens once.
 
-## Plan Setup & Usage Intensity
+## First-Run Setup & Plan Selection
 
-The dashboard includes a **usage intensity chart** that tracks your rolling 5-hour token budget — the same window Anthropic uses to rate-limit Claude.ai subscriptions. Because Claude Code has no API to detect your current plan automatically, the script asks you to select it once during setup:
+On first launch, the script prompts you to select your Claude subscription plan:
 
 ```
+┌─────────────────────────────────────────────────┐
+│   Claude Code Token Dashboard — First-Time Setup  │
+└─────────────────────────────────────────────────┘
+
 Select your Claude subscription plan:
 
-  1.  Pro        $20/mo
-  2.  Max 5×     $100/mo
-  3.  Max 20×    $200/mo
+  1.  Pro         $20/mo
+  2.  Max 5×      $100/mo
+  3.  Max 20×     $200/mo
+
+Enter 1, 2, or 3:
 ```
 
-Your choice is saved to `~/.claude/skills/token-dashboard/config.json`. The intensity chart is scaled relative to your plan's 5-hour session budget (Anthropic publishes multipliers, not absolute token counts).
+Your choice is saved to `~/.claude/skills/token-dashboard/config.json` (gitignored). The selected plan:
 
-> **Note:** Anthropic does not expose your subscription plan through any API or Claude Code interface. The dashboard cannot detect plan changes automatically. If you upgrade or downgrade, tell Claude — it will re-run setup to update the setting.
+1. **Scales the Usage Intensity chart** — the 5-hour rolling window is sized relative to your plan's session budget (Anthropic publishes multipliers, not absolute token counts, so the chart shows % of budget consumed rather than raw limits)
+2. **Appears in the dashboard header** — displayed as e.g. **PLAN · Max 5×** so you always know which plan the intensity chart is calibrated to
+
+> **Limitation:** Claude Code does not expose your subscription plan through any API or interface — the dashboard cannot detect it automatically. If you upgrade or downgrade, tell Claude ("I changed my plan to Max 20×") and it will re-run setup to update the setting.
 
 **To re-run setup manually:**
 ```bash
@@ -108,18 +118,23 @@ python3 generate_dashboard.py --setup
 ## Usage
 
 ```bash
-# Default: past 7 days
+# Default: past 7 days (starts a local server at http://localhost:8765)
 python3 generate_dashboard.py
 
 # Custom time window
 python3 generate_dashboard.py --days 30
 
-# Override plan for this run only (does not save)
+# Override plan for this run only (does not save to config)
 python3 generate_dashboard.py --plan pro
 
-# Re-run plan selection
+# Re-run plan selection and save to config
 python3 generate_dashboard.py --setup
+
+# Write a static HTML file instead of starting a server
+python3 generate_dashboard.py --output dashboard.html
 ```
+
+The server regenerates data on every Cmd+R — no restart needed to pick up new Claude Code activity.
 
 ## Pricing Configuration
 
@@ -127,9 +142,9 @@ Pricing is defined at the top of `generate_dashboard.py` and can be updated when
 
 ```python
 PRICING = {
-    "claude-opus-4-6":         {"input": 15.00, "output": 75.00, "cache_write": 18.75, "cache_read": 1.50},
-    "claude-sonnet-4-6":       {"input":  3.00, "output": 15.00, "cache_write":  3.75, "cache_read": 0.30},
-    "claude-haiku-4-5-20251001": {"input": 0.80, "output":  4.00, "cache_write":  1.00, "cache_read": 0.08},
+    "claude-opus-4-6":           {"input": 15.00, "output": 75.00, "cache_write": 18.75, "cache_read": 1.50},
+    "claude-sonnet-4-6":         {"input":  3.00, "output": 15.00, "cache_write":  3.75, "cache_read": 0.30},
+    "claude-haiku-4-5-20251001": {"input":  0.80, "output":  4.00, "cache_write":  1.00, "cache_read": 0.08},
 }
 ```
 
@@ -140,6 +155,7 @@ Costs are in USD per million tokens.
 - Reads logs from `~/.claude/projects/` on your local machine
 - No network requests made during generation
 - No data sent to any external service
+- `config.json` (your plan selection) is gitignored and never leaves your machine
 - The generated HTML is a static file — safe to share if you redact the session descriptions
 
 ## License
