@@ -2068,7 +2068,7 @@ def main():
                 self.send_response(204)
                 self.end_headers()
                 return
-            html = build_html(days, cap, args.plan)
+            html = build_html(days, cap, plan)
             body = html.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
