@@ -769,6 +769,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 <div class="container">
 
+  <!-- Plan Banner -->
+  <div id="plan-banner" style="display:flex;align-items:center;gap:10px;margin-bottom:20px;padding:10px 16px;border-radius:8px;background:var(--bg2);border:1px solid var(--border);">
+    <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--muted);">Current Plan</span>
+    <span id="plan-banner-name" style="font-size:15px;font-weight:700;color:var(--text);letter-spacing:0.01em;"></span>
+    <span style="flex:1"></span>
+    <span style="font-size:11px;color:var(--muted);">Token cap per 5h window:</span>
+    <span id="plan-banner-cap" style="font-size:13px;font-weight:600;color:var(--blue);font-variant-numeric:tabular-nums;"></span>
+  </div>
+
   <!-- KPI Cards -->
   <div class="section-title">Overview</div>
   <div class="kpi-grid" id="kpi-cards"></div>
@@ -944,7 +953,12 @@ function fmt_time(iso) {
 
 // ── KPIs ───────────────────────────────────────────────────────────
 document.getElementById('gen-time').textContent = 'Generated: ' + DATA.generated_at;
-if (DATA.plan_name) document.getElementById('plan-badge').textContent = DATA.plan_name;
+if (DATA.plan_name) {
+  document.getElementById('plan-badge').textContent = DATA.plan_name;
+  document.getElementById('plan-banner-name').textContent = DATA.plan_name;
+  const cap = DATA.intensity && DATA.intensity.cap;
+  document.getElementById('plan-banner-cap').textContent = cap ? fmt_tokens(cap) + ' / 5h' : '—';
+}
 const k = DATA.kpis;
 const kpi_defs = [
   { label: 'Total Tokens', value: fmt_tokens(k.total_tokens), sub: k.total_requests + ' API requests', sub2: '≈ ' + fmt_kpi_cost(k.total_cost) + ' API equiv', cls: 'tokens' },
