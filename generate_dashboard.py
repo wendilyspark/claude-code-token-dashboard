@@ -296,34 +296,61 @@ PLAN_CAPS = {
     "max20x": 440_000_000,    # ~440M tokens per 5h window (10× Pro estimate)
 }
 
-WINDOW_ANCHOR_HOUR = 22  # 10pm local time — aligns with observed Claude Max plan window boundaries
+WINDOW_DUR = timedelta(hours=5)
 
 
-def _window_anchor_utc(anchor_hour: int = WINDOW_ANCHOR_HOUR) -> datetime:
-    """Return the single global reference point: most recent past anchor_hour:00 local time.
-    All 5h windows are ±N×5h from this point — never re-anchored per-timestamp."""
-    local_tz = datetime.now().astimezone().tzinfo
-    now_local = datetime.now(local_tz)
-    ref = now_local.replace(hour=anchor_hour, minute=0, second=0, microsecond=0)
-    if ref > now_local:
-        ref -= timedelta(days=1)  # anchor hasn't happened yet today — use yesterday's
-    return ref.astimezone(timezone.utc)
+def derive_windows(message_timestamps, anchor_reset_at=None):
+    """Derive 5h windows covering all message timestamps.
+
+    If `anchor_reset_at` is supplied (a future datetime telling us when Claude's
+    *current* window ends), windows are back-derived from that anchor in exact
+    5h steps — this is the source-of-truth path, matching Claude's UI clock.
+
+    Otherwise, falls back to a gap-based heuristic: a new window opens whenever
+    a message arrives ≥5h after the prior window's start.
+    """
+    timestamps = sorted(message_timestamps)
+    if not timestamps:
+        return []
+
+    if anchor_reset_at is not None:
+        # Walk backwards from anchor in 5h steps until we cover the earliest msg
+        earliest = timestamps[0]
+        starts = []
+        cur_start = anchor_reset_at - WINDOW_DUR
+        while cur_start + WINDOW_DUR > earliest:
+            starts.append(cur_start)
+            cur_start -= WINDOW_DUR
+        starts.reverse()
+        return starts
+
+    starts = []
+    cur_start = None
+    for ts in timestamps:
+        if cur_start is None or ts >= cur_start + WINDOW_DUR:
+            cur_start = ts
+            starts.append(cur_start)
+    return starts
 
 
-# Compute once at build time so all window calculations share the same reference
-_ANCHOR_UTC = _window_anchor_utc()
+def window_start_for(t, window_starts):
+    """Return the window start containing t, or None if t falls in a dead zone."""
+    # Binary search would be fine but linear-from-end is simpler and fast enough
+    for ws in reversed(window_starts):
+        if ws <= t < ws + WINDOW_DUR:
+            return ws
+        if ws <= t:
+            return None  # t is past this window's end and before next window start
+    return None
 
 
-def get_fixed_window_start(t_utc: datetime, anchor_hour: int = WINDOW_ANCHOR_HOUR) -> datetime:
-    """Return start of the fixed 5h window containing t_utc, using the global anchor."""
-    window_secs = 5 * 3600
-    delta = (t_utc - _ANCHOR_UTC).total_seconds()
-    k = int(delta // window_secs)
-    return _ANCHOR_UTC + timedelta(seconds=k * window_secs)
+def compute_intensity(sessions: dict, cap: int, anchor_reset_at=None):
+    """Compute 5-hour token usage windows.
 
-
-def compute_intensity(sessions: dict, cap: int):
-    """Compute fixed 5-hour token usage windows and usage intensity."""
+    If anchor_reset_at (datetime, future) is provided, windows are anchored to
+    Claude's actual reset clock (back-derived in 5h steps). Otherwise falls
+    back to gap-based derivation from message activity.
+    """
     # Collect all messages across all sessions with timestamps
     all_msgs = []
     for sid, s in sessions.items():
@@ -365,24 +392,28 @@ def compute_intensity(sessions: dict, cap: int):
     if not slot_tokens:
         return {"windows": [], "peaks": [], "heatmap": [[0]*24 for _ in range(7)], "cap": cap}
 
-    # Generate rolling 5h windows at 15-min steps
+    # Derive windows — anchored to Claude UI reset time if available, else gap-based
+    window_starts = derive_windows([m["ts"] for m in all_msgs], anchor_reset_at)
+
+    # Generate rolling samples at 15-min steps; each sample sums tokens since its
+    # containing window's start through the sample time. Slots in dead zones
+    # (between an expired window and the next first-message) get 0.
     sorted_slots = sorted(slot_tokens.keys())
     min_time = sorted_slots[0]
     max_time = sorted_slots[-1]
-    window_dur = timedelta(hours=5)
 
     windows = []
     current = min_time
     while current <= max_time:
-        # Sum tokens in [window_start, current] using fixed anchor-aligned windows
-        window_start = get_fixed_window_start(current)
+        ws = window_start_for(current, window_starts)
         total = 0
         active_sessions = set()
-        for sk, tk in slot_tokens.items():
-            if window_start <= sk <= current:
-                total += tk
-                active_sessions.update(slot_sessions[sk])
-        pct = round(total / cap * 100, 1) if cap > 0 else 0
+        if ws is not None:
+            for sk, tk in slot_tokens.items():
+                if ws <= sk <= current:
+                    total += tk
+                    active_sessions.update(slot_sessions[sk])
+        pct = round(total / cap * 100, 1) if cap > 0 and ws is not None else 0
         windows.append({
             "ts": current.isoformat(),
             "tokens": total,
@@ -395,12 +426,13 @@ def compute_intensity(sessions: dict, cap: int):
     peaks = []
     for w in windows:
         if w["pct"] >= 85:
-            # Find active sessions in this 5h window
             window_end = parse_ts(w["ts"])
-            window_start = get_fixed_window_start(window_end)
+            ws = window_start_for(window_end, window_starts)
+            if ws is None:
+                continue
             session_info = {}
             for sk, details in slot_details.items():
-                if window_start < sk <= window_end:
+                if ws < sk <= window_end:
                     for d in details:
                         if d["slug"] not in session_info:
                             session_info[d["slug"]] = {"task": d["task"], "tokens": 0, "model": d["model"]}
@@ -426,17 +458,38 @@ def compute_intensity(sessions: dict, cap: int):
         hour = m["ts"].hour
         heatmap[dow][hour] += m["tokens"]
 
+    # Current-window sync: derive whether a window is active right now, and if so
+    # how much of the budget has been consumed since it opened. Computed at
+    # build time so every Cmd+R refresh re-reads from fresh data.
+    now_utc = datetime.now(timezone.utc)
+    current_window = None
+    if window_starts:
+        latest_start = window_starts[-1]
+        latest_end = latest_start + WINDOW_DUR
+        if now_utc < latest_end:
+            tokens_so_far = sum(
+                tk for sk, tk in slot_tokens.items() if latest_start <= sk <= now_utc
+            )
+            current_window = {
+                "start": latest_start.isoformat(),
+                "end": latest_end.isoformat(),
+                "tokens": tokens_so_far,
+                "pct": round(tokens_so_far / cap * 100, 1) if cap > 0 else 0,
+                "seconds_remaining": int((latest_end - now_utc).total_seconds()),
+                "seconds_elapsed": int((now_utc - latest_start).total_seconds()),
+            }
+
     return {
         "windows": windows,
         "peaks": deduped_peaks,
         "heatmap": heatmap,
         "cap": cap,
-        "window_anchor_hour": WINDOW_ANCHOR_HOUR,
-        "window_anchor_ts": _ANCHOR_UTC.isoformat(),  # absolute UTC reference, used by JS
+        "window_starts": [ws.isoformat() for ws in window_starts],
+        "current_window": current_window,
     }
 
 
-def aggregate(sessions: dict, hourly: dict, days: int = 7, cap: int = 0):
+def aggregate(sessions: dict, hourly: dict, days: int = 7, cap: int = 0, anchor_reset_at=None):
     """Compute final aggregates for the dashboard."""
     session_titles = load_session_titles()   # cliSessionId → human title
 
@@ -559,7 +612,7 @@ def aggregate(sessions: dict, hourly: dict, days: int = 7, cap: int = 0):
     total_requests = sum(sess["request_count"] for sess in session_list)
 
     # Usage intensity (rolling 5h windows)
-    intensity = compute_intensity(sessions, cap) if cap > 0 else None
+    intensity = compute_intensity(sessions, cap, anchor_reset_at) if cap > 0 else None
 
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -798,7 +851,23 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
   <!-- Usage Intensity -->
   <div id="intensity-section" class="intensity-section" style="display:none">
-    <div class="section-title">Usage Intensity <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;font-size:11px">— fixed 5h windows · cumulative budget consumed per window</span></div>
+    <div class="section-title">Usage Intensity <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;font-size:11px">— 5h windows · cumulative budget consumed per window</span></div>
+    <div class="chart-card" style="margin-bottom:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+        <div>
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Reset clock (from Claude UI)</div>
+          <div id="anchor-status" style="font-size:13px">—</div>
+        </div>
+        <form id="anchor-form" style="display:flex;align-items:center;gap:6px">
+          <label style="font-size:11px;color:var(--muted)">Resets in</label>
+          <input id="anchor-mins" type="number" min="1" max="300" step="1" placeholder="50"
+                 style="width:70px;padding:5px 8px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#e6edf3;font-size:12px" />
+          <span style="font-size:11px;color:var(--muted)">min</span>
+          <button type="submit" style="padding:5px 10px;background:#1f6feb;border:none;border-radius:4px;color:#fff;font-size:11px;cursor:pointer">Set</button>
+          <button type="button" id="anchor-clear" style="padding:5px 8px;background:transparent;border:1px solid #30363d;border-radius:4px;color:var(--muted);font-size:11px;cursor:pointer">Clear</button>
+        </form>
+      </div>
+    </div>
     <div class="chart-card">
       <h3>5-Hour Window Budget Usage <span style="font-weight:400;font-size:11px;color:var(--muted)">— cumulative % of token budget consumed since each window start · dashed lines mark resets</span></h3>
       <canvas id="intensityChart"></canvas>
@@ -1599,27 +1668,31 @@ function openPeakModal(d) {
 }
 
 let intensityChart = null;
-// Single global anchor from Python — the most recent past 22:00 local time, as UTC ISO string
-const INTENSITY_ANCHOR_MS = DATA.intensity ? new Date(DATA.intensity.window_anchor_ts).getTime() : Date.now();
 const INTENSITY_WINDOW_MS = 5 * 3600 * 1000;
+// Real window starts derived from actual message activity (not a fixed clock anchor)
+const WINDOW_STARTS_MS = (DATA.intensity && DATA.intensity.window_starts)
+  ? DATA.intensity.window_starts.map(s => new Date(s).getTime())
+  : [];
 
-// Returns ms of each window boundary (reset point) within [startMs, endMs]
-// All windows computed relative to the single global anchor — consistent across all dates
+// Window boundaries shown on chart: every derived window start AND its end (start + 5h)
 function getWindowBoundaries(startMs, endMs) {
-  const diff = startMs - INTENSITY_ANCHOR_MS;
-  const k = Math.floor(diff / INTENSITY_WINDOW_MS);
-  let t = INTENSITY_ANCHOR_MS + k * INTENSITY_WINDOW_MS;
-  if (t <= startMs) t += INTENSITY_WINDOW_MS;
   const out = [];
-  while (t < endMs) { out.push(t); t += INTENSITY_WINDOW_MS; }
+  WINDOW_STARTS_MS.forEach(ws => {
+    if (ws >= startMs && ws < endMs) out.push(ws);
+    const we = ws + INTENSITY_WINDOW_MS;
+    if (we >= startMs && we < endMs) out.push(we);
+  });
   return out;
 }
 
-// Returns the start ms of the fixed window that contains tMs
+// Returns start ms of the window containing tMs, or null if tMs is in a dead zone
 function getWindowStartMs(tMs) {
-  const delta = tMs - INTENSITY_ANCHOR_MS;
-  const k = Math.floor(delta / INTENSITY_WINDOW_MS);
-  return INTENSITY_ANCHOR_MS + k * INTENSITY_WINDOW_MS;
+  for (let i = WINDOW_STARTS_MS.length - 1; i >= 0; i--) {
+    const ws = WINDOW_STARTS_MS[i];
+    if (ws <= tMs && tMs < ws + INTENSITY_WINDOW_MS) return ws;
+    if (ws <= tMs) return null;
+  }
+  return null;
 }
 
 function fmtLocalTime(ms) {
@@ -1713,7 +1786,9 @@ function renderIntensityChart(chartMeta) {
             afterLabel: (ctx2) => {
               const i = ctx2.dataIndex;
               const tMs = slotTimes[i];
-              const winEnd = getWindowStartMs(tMs) + INTENSITY_WINDOW_MS;
+              const ws = getWindowStartMs(tMs);
+              if (ws === null) return '  no active window';
+              const winEnd = ws + INTENSITY_WINDOW_MS;
               const remaining = winEnd - tMs;
               if (remaining <= 0) return '  window ended';
               const hh = Math.floor(remaining / 3600000);
@@ -1807,6 +1882,40 @@ function renderIntensityChart(chartMeta) {
 
   // Sync initial render with whatever view is active in the token usage chart
   renderIntensityChart(lastChartMeta);
+
+  // ── Reset-clock anchor controls ─────────────────────────────────────────────
+  const statusEl = document.getElementById('anchor-status');
+  if (DATA.anchor_active && DATA.anchor_reset_at) {
+    const resetMs = new Date(DATA.anchor_reset_at).getTime();
+    const updateCountdown = () => {
+      const remaining = resetMs - Date.now();
+      if (remaining <= 0) {
+        statusEl.innerHTML = '<span style="color:#d29922">Anchor expired — reload to fall back to gap-based windows, or set a new reset time</span>';
+        return;
+      }
+      const hh = Math.floor(remaining / 3600000);
+      const mm = Math.floor((remaining % 3600000) / 60000);
+      const ss = Math.floor((remaining % 60000) / 1000);
+      const resetLocal = new Date(resetMs).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false});
+      statusEl.innerHTML = `<span style="color:#58a6ff">●</span> Anchored to Claude UI · resets in <b>${hh}h ${String(mm).padStart(2,'0')}m ${String(ss).padStart(2,'0')}s</b> · at <b>${resetLocal}</b>`;
+    };
+    updateCountdown();
+    setInterval(updateCountdown, 1000);
+  } else {
+    statusEl.innerHTML = '<span style="color:var(--muted)">No anchor set — windows derived from message activity (may drift from Claude UI). Set the reset time above to sync.</span>';
+  }
+
+  document.getElementById('anchor-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const mins = parseFloat(document.getElementById('anchor-mins').value);
+    if (!mins || mins <= 0) return;
+    await fetch('/set-reset', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ minutes: mins }) });
+    window.location.reload();
+  });
+  document.getElementById('anchor-clear').addEventListener('click', async () => {
+    await fetch('/set-reset', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ minutes: 0 }) });
+    window.location.reload();
+  });
 
   // Heatmap — rendered client-side from hourly_series, colored by % of hourly plan cap
   const hmCap = intensity.cap || 0;
@@ -2012,8 +2121,23 @@ PLAN_DISPLAY = {
 
 def build_html(days: int, cap: int = 0, plan: str = "max5x") -> str:
     sessions, hourly = parse_projects(days)
-    data = aggregate(sessions, hourly, days, cap)
+
+    # Load Claude-UI-anchored reset time if user has set one and it's still in the future
+    anchor_reset_at = None
+    cfg = load_config()
+    raw = cfg.get("next_reset_at")
+    if raw:
+        try:
+            ts = parse_ts(raw)
+            if ts and ts > datetime.now(timezone.utc):
+                anchor_reset_at = ts
+        except Exception:
+            pass
+
+    data = aggregate(sessions, hourly, days, cap, anchor_reset_at)
     data["plan_name"] = PLAN_DISPLAY.get(plan, plan)
+    data["anchor_active"] = anchor_reset_at is not None
+    data["anchor_reset_at"] = anchor_reset_at.isoformat() if anchor_reset_at else None
     return HTML_TEMPLATE.replace("__DATA__", json.dumps(data, ensure_ascii=False, separators=(',', ':')))
 
 
@@ -2076,6 +2200,27 @@ def main():
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
+
+        def do_POST(self):
+            if self.path != "/set-reset":
+                self.send_response(404); self.end_headers(); return
+            length = int(self.headers.get("Content-Length", 0))
+            payload = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+            minutes = payload.get("minutes")
+            cfg = load_config()
+            if minutes is None or (isinstance(minutes, (int, float)) and minutes <= 0):
+                # Clear the anchor
+                cfg.pop("next_reset_at", None)
+                cfg.pop("next_reset_set_at", None)
+            else:
+                now = datetime.now(timezone.utc)
+                cfg["next_reset_at"] = (now + timedelta(minutes=float(minutes))).isoformat()
+                cfg["next_reset_set_at"] = now.isoformat()
+            save_config(cfg)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": True, "next_reset_at": cfg.get("next_reset_at")}).encode("utf-8"))
 
         def log_message(self, fmt, *a):
             pass  # suppress per-request logs

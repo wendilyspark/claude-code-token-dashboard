@@ -31,13 +31,36 @@ nohup python3 ~/.claude/skills/token-dashboard/generate_dashboard.py --no-open >
 sleep 2
 ```
 
-5. Open the dashboard in the browser:
+5. **Always ask the user for the current Claude UI reset time** before opening the dashboard. This is required every time the skill is invoked — the server-side reset clock is the source of truth, and our anchor expires once that window ends.
+
+   Ask the user something like:
+   > How many minutes until your next 5-hour window resets? (Check the countdown shown in your Claude UI — e.g. "50 min")
+
+   Once they reply with a number of minutes (N), save it to config.json so the dashboard's windows back-derive from Claude's real reset clock:
+   ```bash
+   python3 -c "
+   from datetime import datetime, timedelta, timezone
+   import json, pathlib
+   N = <minutes_from_user>
+   p = pathlib.Path.home() / '.claude/skills/token-dashboard/config.json'
+   cfg = json.loads(p.read_text())
+   now = datetime.now(timezone.utc)
+   cfg['next_reset_at'] = (now + timedelta(minutes=N)).isoformat()
+   cfg['next_reset_set_at'] = now.isoformat()
+   p.write_text(json.dumps(cfg, indent=2))
+   print('Anchored. Reset at', (now + timedelta(minutes=N)).astimezone().strftime('%H:%M local'))
+   "
+   ```
+
+   If the user says they don't know or want to skip, clear the anchor instead (`cfg.pop('next_reset_at', None); cfg.pop('next_reset_set_at', None)`) so the dashboard falls back to gap-based derivation.
+
+6. Open the dashboard in the browser:
 ```bash
 open http://localhost:8765
 ```
 
-6. Tell the user:
-> Dashboard is live at http://localhost:8765 — Cmd+R refreshes data in real time. The server runs in the background until you restart your machine or kill it manually.
+7. Tell the user:
+> Dashboard is live at http://localhost:8765 — anchored to Claude's reset clock (counts down live above the intensity chart). Cmd+R refreshes data in real time. You can re-set the reset time directly on the page using the "Resets in __ min" input if Claude UI shifts.
 
 ## Changing Plans
 
