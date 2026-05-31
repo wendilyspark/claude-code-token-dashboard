@@ -16,6 +16,8 @@ from pathlib import Path
 
 # ─── Pricing per 1M tokens ──────────────────────────────────────────────────
 PRICING = {
+    "claude-opus-4-8":           {"input": 15.00, "output": 75.00, "cache_write": 18.75, "cache_read": 1.50},
+    "claude-opus-4-7":           {"input": 15.00, "output": 75.00, "cache_write": 18.75, "cache_read": 1.50},
     "claude-opus-4-6":           {"input": 15.00, "output": 75.00, "cache_write": 18.75, "cache_read": 1.50},
     "claude-opus-4-5":           {"input": 15.00, "output": 75.00, "cache_write": 18.75, "cache_read": 1.50},
     "claude-sonnet-4-6":         {"input":  3.00, "output": 15.00, "cache_write":  3.75, "cache_read": 0.30},
@@ -37,6 +39,8 @@ TASK_KEYWORDS = {
 }
 
 MODEL_COLORS = {
+    "claude-opus-4-8":           "#c678dd",
+    "claude-opus-4-7":           "#c678dd",
     "claude-opus-4-6":           "#c678dd",
     "claude-opus-4-5":           "#c678dd",
     "claude-sonnet-4-6":         "#61afef",
@@ -981,7 +985,7 @@ function cost_class(c) {
   return 'cost-low';
 }
 const MODEL_COLORS = {
-  'claude-opus-4-6': '#c678dd', 'claude-opus-4-5': '#c678dd',
+  'claude-opus-4-8': '#c678dd', 'claude-opus-4-7': '#c678dd', 'claude-opus-4-6': '#c678dd', 'claude-opus-4-5': '#c678dd',
   'claude-sonnet-4-6': '#61afef', 'claude-sonnet-4-5': '#61afef',
   'claude-haiku-4-5': '#98c379', 'claude-haiku-4-5-20251001': '#98c379',
   'unknown': '#abb2bf',
